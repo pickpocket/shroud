@@ -382,41 +382,38 @@ PreservedAnalyses OpaquePredicatesPass::run(Function &F, FunctionAnalysisManager
 
     for (auto *BB : origBlocks) {
         if (BB->size() < 2) continue;
-
-        // Apply to 80% of blocks
         if (!rng.nextBool(0.8)) continue;
 
-        // Find a split point
-        Instruction *splitPt = nullptr;
-        for (auto &I : *BB) {
-            if (isa<PHINode>(I) || I.isTerminator()) continue;
-            splitPt = &I;
-            break;
-        }
-        if (!splitPt) continue;
+        // Determine how many chained opaque gates to insert on the real path
+        // Each gate splits the block and inserts a predicate + bogus chain
+        // The real code passes through gate after gate
+        int numGates = rng.nextInRange(1, 4); // 1-4 sequential gates per block
 
-        BasicBlock *TailBB = BB->splitBasicBlock(splitPt, "real." + BB->getName());
+        BasicBlock *CurrentBB = BB;
+        for (int gate = 0; gate < numGates; gate++) {
+            if (CurrentBB->size() < 2) break;
 
-        // Chain length: 2-5 bogus blocks deep
-        int chainLen = rng.nextInRange(2, 5);
-        createBogusChain(BB, TailBB, F, rng, chainLen);
-        Changed = true;
-
-        // ALSO: insert a second opaque predicate split within the tail block
-        // to create nested layers
-        if (TailBB->size() > 3 && rng.nextBool(0.5)) {
-            Instruction *splitPt2 = nullptr;
-            int idx = 0;
-            for (auto &I : *TailBB) {
+            // Find a split point (skip PHIs and terminators)
+            Instruction *splitPt = nullptr;
+            int instIdx = 0;
+            for (auto &I : *CurrentBB) {
                 if (isa<PHINode>(I) || I.isTerminator()) continue;
-                idx++;
-                if (idx >= 2) { splitPt2 = &I; break; }
+                instIdx++;
+                // For chained gates, split at different positions in the block
+                if (instIdx >= (gate + 1)) { splitPt = &I; break; }
             }
-            if (splitPt2) {
-                BasicBlock *TailBB2 = TailBB->splitBasicBlock(splitPt2, "real2." + BB->getName());
-                int chainLen2 = rng.nextInRange(1, 3);
-                createBogusChain(TailBB, TailBB2, F, rng, chainLen2);
-            }
+            if (!splitPt) break;
+
+            BasicBlock *TailBB = CurrentBB->splitBasicBlock(splitPt,
+                "real." + std::to_string(rng.next32()));
+
+            // Each gate gets its own bogus chain with random depth
+            int chainLen = rng.nextInRange(2, 5);
+            createBogusChain(CurrentBB, TailBB, F, rng, chainLen);
+            Changed = true;
+
+            // The next gate operates on the tail block
+            CurrentBB = TailBB;
         }
     }
 
