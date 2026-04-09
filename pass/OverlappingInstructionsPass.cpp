@@ -91,10 +91,12 @@ generateDynamicPattern(ObfRNG &rng, bool intel) {
 
     int strategy;
     int roll = rng.nextInRange(0, 99);
-    if (roll < 25)
+    if (roll < 20)
+        strategy = 35 + rng.nextInRange(0, 4);  // 15-byte NOP control flow (35-39)
+    else if (roll < 40)
         strategy = 23 + rng.nextInRange(0, 11); // 15-byte NOP opaque + delayed traps (23-34)
-    else if (roll < 50)
-        strategy = 15 + rng.nextInRange(0, 7);  // NOP control flow (15-22)
+    else if (roll < 55)
+        strategy = 15 + rng.nextInRange(0, 7);  // 8-byte NOP control flow (15-22)
     else if (roll < 70)
         strategy = 10 + rng.nextInRange(0, 4);  // NOP overlap (10-14)
     else
@@ -640,6 +642,103 @@ generateDynamicPattern(ObfRNG &rng, bool intel) {
             asm_ss << "subl $$" << std::dec << rng.nextInRange(1,100) << ", " << reg << "\n";
         }
         asm_ss << ".byte 0xEB, 0xFE\n";
+        asm_ss << Lexit << ":\n";
+        break;
+    }
+
+    // ================================================================
+    // 15-BYTE NOP AS CONTROL FLOW (strategies 35-39)
+    // Same as strategies 15-22 but with 15-byte prefix-stacked NOPs.
+    // Execution threads through the NOP's displacement to reach exit.
+    // Stripping the NOP severs the control flow.
+    // ================================================================
+
+    case 35: {
+        // Single 15-byte NOP bridge
+        std::string Lexit = ".Ls" + std::to_string(labelCounter++) + "x";
+        uint8_t nopOp = 0x19 + rng.nextInRange(0, 6);
+        asm_ss << "jmp " << L1 << "\n";
+        asm_ss << ".byte 0x66, 0x66, 0x66, 0x66, 0x66, 0x66, 0x66\n";
+        asm_ss << ".byte 0x0F, 0x" << std::hex << (int)nopOp << ", 0x84, 0x00\n";
+        asm_ss << L1 << ":\n";
+        asm_ss << "jmp " << Lexit << "\n";
+        asm_ss << ".byte 0x" << std::hex << rng.nextInRange(0,255)
+               << ", 0x" << std::hex << rng.nextInRange(0,255) << "\n";
+        asm_ss << Lexit << ":\n";
+        break;
+    }
+    case 36: {
+        // Double 15-byte NOP chain
+        std::string Lmid = ".Ls" + std::to_string(labelCounter++) + "m";
+        std::string Lexit = ".Ls" + std::to_string(labelCounter++) + "x";
+        uint8_t op1 = 0x19 + rng.nextInRange(0, 6);
+        uint8_t op2 = 0x19 + rng.nextInRange(0, 6);
+        // First 15-byte NOP
+        asm_ss << "jmp " << L1 << "\n";
+        asm_ss << ".byte 0x66, 0x66, 0x66, 0x66, 0x66, 0x66, 0x66\n";
+        asm_ss << ".byte 0x0F, 0x" << std::hex << (int)op1 << ", 0x84, 0x00\n";
+        asm_ss << L1 << ":\njmp " << Lmid << "\n";
+        asm_ss << ".byte 0x" << std::hex << rng.nextInRange(0,255) << ", 0x" << std::hex << rng.nextInRange(0,255) << "\n";
+        // Second 15-byte NOP
+        asm_ss << ".byte 0x66, 0x66, 0x66, 0x66, 0x66, 0x66, 0x66\n";
+        asm_ss << ".byte 0x0F, 0x" << std::hex << (int)op2 << ", 0x84, 0x00\n";
+        asm_ss << Lmid << ":\njmp " << Lexit << "\n";
+        asm_ss << ".byte 0x" << std::hex << rng.nextInRange(0,255) << ", 0x" << std::hex << rng.nextInRange(0,255) << "\n";
+        asm_ss << Lexit << ":\n";
+        break;
+    }
+    case 37: {
+        // Triple 15-byte NOP chain
+        std::string Lm1 = ".Ls" + std::to_string(labelCounter++) + "m";
+        std::string Lm2 = ".Ls" + std::to_string(labelCounter++) + "m";
+        std::string Lexit = ".Ls" + std::to_string(labelCounter++) + "x";
+        uint8_t op1 = 0x19 + rng.nextInRange(0, 6);
+        uint8_t op2 = 0x19 + rng.nextInRange(0, 6);
+        uint8_t op3 = 0x19 + rng.nextInRange(0, 6);
+        asm_ss << "jmp " << L1 << "\n";
+        asm_ss << ".byte 0x66, 0x66, 0x66, 0x66, 0x66, 0x66, 0x66\n";
+        asm_ss << ".byte 0x0F, 0x" << std::hex << (int)op1 << ", 0x84, 0x00\n";
+        asm_ss << L1 << ":\njmp " << Lm1 << "\n";
+        asm_ss << ".byte 0x" << std::hex << rng.nextInRange(0,255) << ", 0x" << std::hex << rng.nextInRange(0,255) << "\n";
+        asm_ss << ".byte 0x66, 0x66, 0x66, 0x66, 0x66, 0x66, 0x66\n";
+        asm_ss << ".byte 0x0F, 0x" << std::hex << (int)op2 << ", 0x84, 0x00\n";
+        asm_ss << Lm1 << ":\njmp " << Lm2 << "\n";
+        asm_ss << ".byte 0x" << std::hex << rng.nextInRange(0,255) << ", 0x" << std::hex << rng.nextInRange(0,255) << "\n";
+        asm_ss << ".byte 0x66, 0x66, 0x66, 0x66, 0x66, 0x66, 0x66\n";
+        asm_ss << ".byte 0x0F, 0x" << std::hex << (int)op3 << ", 0x84, 0x00\n";
+        asm_ss << Lm2 << ":\njmp " << Lexit << "\n";
+        asm_ss << ".byte 0x" << std::hex << rng.nextInRange(0,255) << ", 0x" << std::hex << rng.nextInRange(0,255) << "\n";
+        asm_ss << Lexit << ":\n";
+        break;
+    }
+    case 38: {
+        // 15-byte NOP bridge with ENDBR64 prefix instead of 66 stacking
+        std::string Lexit = ".Ls" + std::to_string(labelCounter++) + "x";
+        asm_ss << "jmp " << L1 << "\n";
+        asm_ss << ".byte 0xF3, 0x0F, 0x1E, 0xFA\n"; // ENDBR64 (4 bytes, dead)
+        asm_ss << ".byte 0x66, 0x66, 0x66\n";         // 3 prefixes
+        asm_ss << ".byte 0x0F, 0x1F, 0x84, 0x00\n";   // NOP opcode
+        asm_ss << L1 << ":\njmp " << Lexit << "\n";
+        asm_ss << ".byte 0x" << std::hex << rng.nextInRange(0,255) << ", 0x" << std::hex << rng.nextInRange(0,255) << "\n";
+        asm_ss << Lexit << ":\n";
+        break;
+    }
+    case 39: {
+        // Mixed 8-byte + 15-byte NOP chain
+        std::string Lmid = ".Ls" + std::to_string(labelCounter++) + "m";
+        std::string Lexit = ".Ls" + std::to_string(labelCounter++) + "x";
+        uint8_t op1 = 0x19 + rng.nextInRange(0, 6);
+        uint8_t op2 = 0x19 + rng.nextInRange(0, 6);
+        // First: 8-byte NOP bridge
+        asm_ss << "jmp " << L1 << "\n";
+        asm_ss << ".byte 0x0F, 0x" << std::hex << (int)op1 << ", 0x84, 0x00\n";
+        asm_ss << L1 << ":\njmp " << Lmid << "\n";
+        asm_ss << ".byte 0x" << std::hex << rng.nextInRange(0,255) << ", 0x" << std::hex << rng.nextInRange(0,255) << "\n";
+        // Second: 15-byte NOP bridge
+        asm_ss << ".byte 0x66, 0x66, 0x66, 0x66, 0x66, 0x66, 0x66\n";
+        asm_ss << ".byte 0x0F, 0x" << std::hex << (int)op2 << ", 0x84, 0x00\n";
+        asm_ss << Lmid << ":\njmp " << Lexit << "\n";
+        asm_ss << ".byte 0x" << std::hex << rng.nextInRange(0,255) << ", 0x" << std::hex << rng.nextInRange(0,255) << "\n";
         asm_ss << Lexit << ":\n";
         break;
     }
