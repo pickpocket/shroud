@@ -307,35 +307,43 @@ static void createBogusChain(BasicBlock *FromBB, BasicBlock *RealTarget,
             "bogus." + std::to_string(rng.next32()), &F));
     }
 
-    // Fill each bogus block: anti-disasm → junk → anti-disasm → predicate → anti-disasm → branch
+    // Fill each bogus block with junk + randomly true/false predicate
     for (int i = 0; i < chainLength; i++) {
         BasicBlock *BB = bogusBlocks[i];
         fillBogusBlock(BB, F, rng);
 
         IRBuilder<> B(BB);
-
-        // Anti-disasm before predicate computation
         emitAntiDisasm(B, rng);
-
         Value *OV = getOpaqueVar(F, B, rng);
-
-        // Anti-disasm between loading opaque var and computing predicate
         emitAntiDisasm(B, rng);
 
         auto builder = allPredicateBuilders[rng.nextInRange(0, NUM_PRED_BUILDERS - 1)];
         Value *Cond = builder(B, OV);
 
-        // Anti-disasm right before the branch
+        // Randomly negate — makes it impossible to know which branch is "real"
+        // even within the bogus chain (both branches lead to valid destinations)
+        bool neg = rng.nextBool();
+        if (neg)
+            Cond = B.CreateXor(Cond, ConstantInt::getTrue(F.getContext()));
+
         emitAntiDisasm(B, rng);
 
         if (i + 1 < chainLength) {
-            if (rng.nextBool()) {
-                B.CreateCondBr(Cond, RealTarget, bogusBlocks[i + 1]);
+            // Both destinations are valid (RealTarget or next bogus)
+            // Randomly assign which branch goes where
+            if (neg) {
+                // Predicate is false: false→next bogus, true→real (or vice versa)
+                if (rng.nextBool())
+                    B.CreateCondBr(Cond, RealTarget, bogusBlocks[i + 1]);
+                else
+                    B.CreateCondBr(Cond, bogusBlocks[i + 1], RealTarget);
             } else {
-                B.CreateCondBr(Cond, bogusBlocks[i + 1], RealTarget);
+                if (rng.nextBool())
+                    B.CreateCondBr(Cond, RealTarget, bogusBlocks[i + 1]);
+                else
+                    B.CreateCondBr(Cond, bogusBlocks[i + 1], RealTarget);
             }
         } else {
-            // Last bogus block: anti-disasm then unconditional branch
             emitAntiDisasm(B, rng);
             B.CreateBr(RealTarget);
         }
@@ -345,22 +353,28 @@ static void createBogusChain(BasicBlock *FromBB, BasicBlock *RealTarget,
     FromBB->getTerminator()->eraseFromParent();
     IRBuilder<> B(FromBB);
 
-    // Anti-disasm before the opaque predicate
     emitAntiDisasm(B, rng);
-
     Value *OV = getOpaqueVar(F, B, rng);
-
-    // Anti-disasm between var load and predicate
     emitAntiDisasm(B, rng);
 
     auto builder = allPredicateBuilders[rng.nextInRange(0, NUM_PRED_BUILDERS - 1)];
     Value *Cond = builder(B, OV);
 
-    // Anti-disasm right before the branch
+    // Randomly negate the predicate (50% chance)
+    // If negated: predicate is always-FALSE, so real code goes on false branch
+    bool negated = rng.nextBool();
+    if (negated)
+        Cond = B.CreateXor(Cond, ConstantInt::getTrue(F.getContext()));
+
     emitAntiDisasm(B, rng);
 
-    // Always-true: true→real, false→first bogus block in chain
-    B.CreateCondBr(Cond, RealTarget, bogusBlocks[0]);
+    if (negated) {
+        // Always-false: false→real, true→bogus
+        B.CreateCondBr(Cond, bogusBlocks[0], RealTarget);
+    } else {
+        // Always-true: true→real, false→bogus
+        B.CreateCondBr(Cond, RealTarget, bogusBlocks[0]);
+    }
 }
 
 // ============================================================================
