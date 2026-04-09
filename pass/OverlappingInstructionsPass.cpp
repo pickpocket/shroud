@@ -237,118 +237,84 @@ generateDynamicPattern(ObfRNG &rng, bool intel) {
     }
 
     // ================================================================
-    // EXOTIC NOP OVERLAP: anti-disasm encoded INSIDE the displacement
-    // field of an exotic NOP instruction. The same bytes are
-    // simultaneously a valid NOP (linear view from the NOP start) and
-    // a JMP-over-rogue pattern (execution view from the displacement).
+    // EXOTIC NOP OVERLAP WITH REAL INSTRUCTIONS
     //
-    // Structure:
-    //   opaque_cond → jz .Linto (jump INTO the NOP's disp field)
-    //   jmp .Lafter
-    //   .byte 0x0F, 0xNN, 0x84, 0x00  ← NOP header (opcode+ModRM+SIB)
-    //   .Linto:                        ← byte 4: start of disp32 field
-    //   .byte 0xEB, 0x01              ← JMP +1 (hidden in disp field)
-    //   .byte 0xRR                    ← rogue byte (skipped by JMP)
-    //   .byte 0x90                    ← NOP (JMP lands here)
-    //   .Lafter:
+    // The displacement field of exotic NOPs contains REAL instructions
+    // that perform actual register computation (using clobbered regs).
+    // Linear disasm sees one 8-byte NOP. Execution JMPs into byte 4
+    // and runs real code that's indistinguishable from the program.
     //
-    // Linear disasm sees: 0F NN 84 00 EB 01 RR 90 = 8-byte exotic NOP
-    // Execution sees: JMP +1 → skip rogue → NOP → continue
-    // ================================================================
-
-    // ================================================================
-    // EXOTIC NOP OVERLAP PATTERNS
-    //
-    // These encode anti-disasm INSIDE the displacement field of exotic
-    // NOPs. The opaque predicate JMPs OVER the NOP header bytes,
-    // landing directly in the displacement field where hidden
-    // instructions live. Linear disasm sees one big NOP. Execution
-    // enters the NOP's guts and runs the hidden JMP.
-    //
-    // Critically: the JMP target (L1) is placed AFTER the NOP header
-    // bytes, so execution never touches the 0F XX 84 00 bytes.
+    // Format: [0F NN 84 00] [4 bytes of real instructions]
+    //          NOP header    displacement = valid code
     // ================================================================
 
     case 10: {
-        // JMP past NOP header into its displacement field
-        // Linear: [NOP header][EB 01 RR 90] = 8-byte exotic NOP
-        // Exec: JMP to EB 01 → skip RR → NOP → continue
-        uint8_t nopOp = 0x19 + rng.nextInRange(0, 6); // 0F 19-1F
-        uint8_t rogueB = rng.nextInRange(0, 255);
+        // Hidden real instructions inside exotic NOP — use asm mnemonics not raw bytes
+        uint8_t nopOp = 0x19 + rng.nextInRange(0, 6);
         asm_ss << "jmp " << L1 << "\n";
-        // NOP header (dead code — never executed, but linear disasm parses it)
         asm_ss << ".byte 0x0F, 0x" << std::hex << (int)nopOp << ", 0x84, 0x00\n";
-        // L1 lands here — these bytes are the NOP's displacement field
         asm_ss << L1 << ":\n";
-        asm_ss << ".byte 0xEB, 0x01\n"; // JMP +1 (skip rogue)
-        asm_ss << ".byte 0x" << std::hex << (int)rogueB << "\n";
-        asm_ss << ".byte 0x90\n"; // land here
+        // Use asm mnemonics — assembler handles encoding correctly
+        if (intel) asm_ss << "xor " << reg << ", " << reg << "\n";
+        else       asm_ss << "xorl " << reg << ", " << reg << "\n";
+        asm_ss << "nop\nnop\n"; // pad to ensure NOP header bytes consumed
         asm_ss << L2 << ":\n";
         break;
     }
     case 11: {
-        // Opaque XOR + JZ over exotic NOP header into hidden JMP
+        // Hidden: ADD reg, random + NOP inside exotic NOP
         uint8_t nopOp = 0x19 + rng.nextInRange(0, 6);
-        uint8_t rogueB = rng.nextInRange(0, 255);
-        if (intel)
-            asm_ss << "xor " << reg << ", " << reg << "\n";
-        else
-            asm_ss << "xorl " << reg << ", " << reg << "\n";
-        asm_ss << "jz " << L1 << "\n"; // always taken — skip NOP header
-        // NOP header (dead — JZ skips it)
+        uint32_t imm = rng.nextInRange(1, 127);
+        if (intel) asm_ss << "xor " << reg << ", " << reg << "\n";
+        else       asm_ss << "xorl " << reg << ", " << reg << "\n";
+        asm_ss << "jz " << L1 << "\n";
         asm_ss << ".byte 0x0F, 0x" << std::hex << (int)nopOp << ", 0x84, 0x00\n";
-        asm_ss << L1 << ":\n"; // byte 4 of NOP = displacement
-        asm_ss << ".byte 0xEB, 0x01\n";
-        asm_ss << ".byte 0x" << std::hex << (int)rogueB << "\n";
-        asm_ss << ".byte 0x90\n";
+        asm_ss << L1 << ":\n";
+        if (intel) asm_ss << "add " << reg << ", " << std::dec << imm << "\nnop\n";
+        else       asm_ss << "addl $$" << std::dec << imm << ", " << reg << "\nnop\n";
         asm_ss << L2 << ":\n";
         break;
     }
     case 12: {
-        // STC + JNC (never taken) + JMP over exotic NOP with random SIB
-        uint8_t sibByte = rng.nextInRange(0, 255);
-        uint8_t rogueB1 = rng.nextInRange(0, 255);
-        uint8_t rogueB2 = rng.nextInRange(0, 255);
+        // Hidden: SUB reg, random inside exotic NOP
+        uint8_t nopOp = 0x19 + rng.nextInRange(0, 6);
+        uint32_t imm = rng.nextInRange(1, 127);
         asm_ss << "jmp " << L1 << "\n";
-        // Dead: exotic NOP with random SIB
-        asm_ss << ".byte 0x0F, 0x1D, 0x84, 0x" << std::hex << (int)sibByte << "\n";
-        asm_ss << L1 << ":\n"; // in the NOP's displacement
-        asm_ss << ".byte 0xEB, 0x02\n"; // JMP +2
-        asm_ss << ".byte 0x" << std::hex << (int)rogueB1
-               << ", 0x" << std::hex << (int)rogueB2 << "\n";
+        asm_ss << ".byte 0x0F, 0x" << std::hex << (int)nopOp << ", 0x84, 0x00\n";
+        asm_ss << L1 << ":\n";
+        if (intel) asm_ss << "sub " << reg << ", " << std::dec << imm << "\nnop\n";
+        else       asm_ss << "subl $$" << std::dec << imm << ", " << reg << "\nnop\n";
         asm_ss << L2 << ":\n";
         break;
     }
     case 13: {
-        // Exotic NOP with fake CALL in displacement
+        // Hidden: XOR reg, random inside exotic NOP
         uint8_t nopOp = 0x19 + rng.nextInRange(0, 6);
-        if (intel)
-            asm_ss << "xor " << reg << ", " << reg << "\n";
-        else
-            asm_ss << "xorl " << reg << ", " << reg << "\n";
-        asm_ss << "jz " << L1 << "\n"; // always taken
-        // Dead: exotic NOP header + CALL rogue in displacement
+        uint32_t imm = rng.nextInRange(1, 255);
+        if (intel) asm_ss << "sub " << reg << ", " << reg << "\n";
+        else       asm_ss << "subl " << reg << ", " << reg << "\n";
+        asm_ss << "jnz " << L2 << "\n";
+        asm_ss << "jmp " << L1 << "\n";
         asm_ss << ".byte 0x0F, 0x" << std::hex << (int)nopOp << ", 0x84, 0x00\n";
         asm_ss << L1 << ":\n";
-        asm_ss << ".byte 0xEB, 0x05\n"; // JMP +5 (skip fake CALL)
-        asm_ss << ".byte 0xE8\n"; // fake CALL
-        asm_ss << ".byte 0x" << std::hex << rng.nextInRange(0,255)
-               << ", 0x" << std::hex << rng.nextInRange(0,255)
-               << ", 0x" << std::hex << rng.nextInRange(0,255)
-               << ", 0x" << std::hex << rng.nextInRange(0,255) << "\n";
+        if (intel) asm_ss << "xor " << reg << ", " << std::dec << imm << "\nnop\n";
+        else       asm_ss << "xorl $$" << std::dec << imm << ", " << reg << "\nnop\n";
         asm_ss << L2 << ":\n";
         break;
     }
     case 14: {
-        // ENDBR64 as dead code + JMP into rogue region after it
+        // Hidden: ADD reg,reg; SUB reg,reg (cancel) after ENDBR64
         asm_ss << "jmp " << L1 << "\n";
-        // Dead: ENDBR64 (CET NOP) + rogue CALL
-        asm_ss << ".byte 0xF3, 0x0F, 0x1E, 0xFA\n"; // ENDBR64
-        asm_ss << ".byte 0xE8\n"; // rogue CALL start
-        asm_ss << L1 << ":\n"; // lands inside CALL's disp32
-        asm_ss << ".byte 0xEB, 0x02\n"; // JMP +2 (skip rest of fake disp)
-        asm_ss << ".byte 0x" << std::hex << rng.nextInRange(0,255)
-               << ", 0x" << std::hex << rng.nextInRange(0,255) << "\n";
+        asm_ss << ".byte 0xF3, 0x0F, 0x1E, 0xFA\n";
+        asm_ss << ".byte 0xE8\n";
+        asm_ss << L1 << ":\n";
+        if (intel) {
+            asm_ss << "add " << reg << ", " << reg << "\n";
+            asm_ss << "sub " << reg << ", " << reg << "\n";
+        } else {
+            asm_ss << "addl " << reg << ", " << reg << "\n";
+            asm_ss << "subl " << reg << ", " << reg << "\n";
+        }
         asm_ss << L2 << ":\n";
         break;
     }
