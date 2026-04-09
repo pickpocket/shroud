@@ -15,12 +15,9 @@ using namespace llvm;
 
 namespace shroud {
 
-// ============================================================================
-// Opaque predicate builders — each constructs a different always-true condition
-// ============================================================================
+// Opaque predicate builders — each constructs a different always-true condition.
 
 static Value* buildPredicate_ConsecEven(IRBuilder<> &B, Value *X) {
-    // x*(x+1) % 2 == 0
     Type *T = X->getType();
     Value *XP1 = B.CreateAdd(X, ConstantInt::get(T, 1));
     Value *Prod = B.CreateMul(X, XP1);
@@ -29,19 +26,16 @@ static Value* buildPredicate_ConsecEven(IRBuilder<> &B, Value *X) {
 }
 
 static Value* buildPredicate_OrComplement(IRBuilder<> &B, Value *X) {
-    // (x | ~x) == -1
     Type *T = X->getType();
     return B.CreateICmpEQ(B.CreateOr(X, B.CreateNot(X)), ConstantInt::getAllOnesValue(T));
 }
 
 static Value* buildPredicate_XorSelf(IRBuilder<> &B, Value *X) {
-    // (x ^ x) == 0
     Type *T = X->getType();
     return B.CreateICmpEQ(B.CreateXor(X, X), ConstantInt::get(T, 0));
 }
 
 static Value* buildPredicate_Partition(IRBuilder<> &B, Value *X) {
-    // (x & y) + (x | y) == x + y [partition identity]
     Type *T = X->getType();
     Value *Y = B.CreateAdd(X, ConstantInt::get(T, 7));
     return B.CreateICmpEQ(
@@ -50,7 +44,6 @@ static Value* buildPredicate_Partition(IRBuilder<> &B, Value *X) {
 }
 
 static Value* buildPredicate_Carry(IRBuilder<> &B, Value *X) {
-    // (x + y) == (x ^ y) + 2*(x & y)
     Type *T = X->getType();
     Value *Y = B.CreateAdd(X, ConstantInt::get(T, 13));
     return B.CreateICmpEQ(
@@ -59,7 +52,6 @@ static Value* buildPredicate_Carry(IRBuilder<> &B, Value *X) {
 }
 
 static Value* buildPredicate_DeMorgan(IRBuilder<> &B, Value *X) {
-    // ~(x & y) == (~x | ~y)
     Type *T = X->getType();
     Value *Y = B.CreateMul(X, ConstantInt::get(T, 3));
     return B.CreateICmpEQ(
@@ -68,7 +60,6 @@ static Value* buildPredicate_DeMorgan(IRBuilder<> &B, Value *X) {
 }
 
 static Value* buildPredicate_Fermat(IRBuilder<> &B, Value *X) {
-    // x^3 - x ≡ 0 (mod 3)
     Type *T = X->getType();
     Value *X2 = B.CreateMul(X, X);
     Value *X3 = B.CreateMul(X2, X);
@@ -78,7 +69,6 @@ static Value* buildPredicate_Fermat(IRBuilder<> &B, Value *X) {
 }
 
 static Value* buildPredicate_Consec3(IRBuilder<> &B, Value *X) {
-    // x*(x+1)*(x+2) % 6 == 0
     Type *T = X->getType();
     Value *XP1 = B.CreateAdd(X, ConstantInt::get(T, 1));
     Value *XP2 = B.CreateAdd(X, ConstantInt::get(T, 2));
@@ -88,15 +78,14 @@ static Value* buildPredicate_Consec3(IRBuilder<> &B, Value *X) {
 }
 
 static Value* buildPredicate_TwosComp(IRBuilder<> &B, Value *X) {
-    // -x == ~x + 1
     Type *T = X->getType();
     return B.CreateICmpEQ(
         B.CreateNeg(X),
         B.CreateAdd(B.CreateNot(X), ConstantInt::get(T, 1)));
 }
 
+// x^2 mod 4 is always in {0, 1}
 static Value* buildPredicate_QRMod4(IRBuilder<> &B, Value *X) {
-    // x^2 mod 4 < 2 (always true: QR mod 4 = {0, 1})
     Type *T = X->getType();
     Value *X2 = B.CreateMul(X, X);
     Value *Rem = B.CreateURem(X2, ConstantInt::get(T, 4));
@@ -104,15 +93,12 @@ static Value* buildPredicate_QRMod4(IRBuilder<> &B, Value *X) {
 }
 
 static Value* buildPredicate_BitClear(IRBuilder<> &B, Value *X) {
-    // (x & (x-1)) has fewer set bits than x (or x == 0) — simplified to:
-    // (x & ~x) == 0 (always true)
     Type *T = X->getType();
     return B.CreateICmpEQ(B.CreateAnd(X, B.CreateNot(X)), ConstantInt::get(T, 0));
 }
 
+// Rotate left then right — result equals original.
 static Value* buildPredicate_RotateRT(IRBuilder<> &B, Value *X) {
-    // ((x << 7) | (x >> 25)) rotated back == x (simplified: just check an identity)
-    // (x | 0) == x (trivially true, but hidden in MBA-like form)
     Type *T = X->getType();
     Value *Shifted = B.CreateOr(B.CreateShl(X, ConstantInt::get(T, 7)),
                                  B.CreateLShr(X, ConstantInt::get(T, 25)));
@@ -120,11 +106,6 @@ static Value* buildPredicate_RotateRT(IRBuilder<> &B, Value *X) {
                                    B.CreateLShr(Shifted, ConstantInt::get(T, 7)));
     return B.CreateICmpEQ(Unshifted, X);
 }
-
-// ============================================================================
-// Dynamic anti-disassembly — every instance is unique
-// Uses the same generator as OverlappingInstructionsPass
-// ============================================================================
 
 static const char* opqRegs_intel[] = { "eax","ebx","ecx","edx","esi","edi" };
 static const char* opqRegs_att[]   = { "%eax","%ebx","%ecx","%edx","%esi","%edi" };
@@ -148,7 +129,6 @@ static void emitAntiDisasm(IRBuilder<> &B, ObfRNG &rng) {
     std::string L1 = ".Lo" + std::to_string(labelId) + "a";
     std::string L2 = ".Lo" + std::to_string(labelId) + "b";
 
-    // Random rogue bytes
     std::ostringstream rogue;
     int rogueTy = rng.nextInRange(0, 4);
     const char* rogueStarts[] = {"0xE8","0xE9","0x68","0x48, 0xB8","0xFF, 0x15"};
@@ -156,7 +136,6 @@ static void emitAntiDisasm(IRBuilder<> &B, ObfRNG &rng) {
     for (int i = 0; i < rng.nextInRange(1, 4); i++)
         rogue << ", 0x" << std::hex << rng.nextInRange(0, 255);
 
-    // Build dynamic asm
     std::ostringstream ss;
     int strategy = rng.nextInRange(0, 6);
     switch (strategy) {
@@ -222,18 +201,13 @@ static PredicateBuilder allPredicateBuilders[] = {
 };
 static constexpr int NUM_PRED_BUILDERS = sizeof(allPredicateBuilders) / sizeof(allPredicateBuilders[0]);
 
-// ============================================================================
-// Get or create an opaque variable for use in predicates
-// ============================================================================
 static Value* getOpaqueVar(Function &F, IRBuilder<> &Builder, ObfRNG &rng) {
     Type *I32 = Type::getInt32Ty(F.getContext());
 
-    // Try to use a function argument
     for (auto &Arg : F.args()) {
         if (Arg.getType()->isIntegerTy(32))
             return &Arg;
     }
-    // Try to use a function argument and cast
     for (auto &Arg : F.args()) {
         if (Arg.getType()->isIntegerTy())
             return Builder.CreateZExtOrTrunc(&Arg, I32);
@@ -241,7 +215,6 @@ static Value* getOpaqueVar(Function &F, IRBuilder<> &Builder, ObfRNG &rng) {
             return Builder.CreatePtrToInt(&Arg, I32);
     }
 
-    // Create a volatile global
     auto *GV = new GlobalVariable(*F.getParent(), I32, false,
         GlobalValue::PrivateLinkage,
         ConstantInt::get(I32, rng.next32()),
@@ -251,20 +224,15 @@ static Value* getOpaqueVar(Function &F, IRBuilder<> &Builder, ObfRNG &rng) {
     return Load;
 }
 
-// ============================================================================
-// Fill bogus block with junk computation that looks real
-// ============================================================================
 static void fillBogusBlock(BasicBlock *BB, Function &F, ObfRNG &rng) {
     IRBuilder<> B(BB);
     Type *I32 = Type::getInt32Ty(F.getContext());
 
-    // Anti-disasm at block entry
     emitAntiDisasm(B, rng);
 
     Value *V = ConstantInt::get(I32, rng.next32());
     int numJunkOps = rng.nextInRange(4, 10);
     for (int i = 0; i < numJunkOps; i++) {
-        // Scatter anti-disasm between junk ops
         if (rng.nextBool(0.4))
             emitAntiDisasm(B, rng);
 
@@ -280,25 +248,18 @@ static void fillBogusBlock(BasicBlock *BB, Function &F, ObfRNG &rng) {
         }
     }
 
-    // Anti-disasm before the store
     emitAntiDisasm(B, rng);
 
-    // Store to a volatile global to prevent DCE (random name to avoid patterns)
+    // Volatile store to prevent DCE
     auto *JunkGV = new GlobalVariable(*F.getParent(), I32, false,
         GlobalValue::PrivateLinkage, ConstantInt::get(I32, 0),
         std::string(gPrefixes[rng.nextInRange(0, 7)]) + std::to_string(rng.next32()));
     auto *Store = B.CreateStore(V, JunkGV);
     Store->setVolatile(true);
 
-    // Anti-disasm at block end (before terminator will be added)
     emitAntiDisasm(B, rng);
 }
 
-// ============================================================================
-// Create a chain of N bogus blocks connected together
-// Each bogus block has junk code and an opaque predicate branching to the next
-// The chain eventually converges back to the real continuation
-// ============================================================================
 // Fix PHI nodes in Target that don't have entries for new predecessors
 static void fixPHIsForNewPred(BasicBlock *Target, BasicBlock *NewPred, BasicBlock *ExistingPred) {
     for (auto &I : *Target) {
@@ -319,7 +280,6 @@ static void createBogusChain(BasicBlock *FromBB, BasicBlock *RealTarget,
             "bogus." + std::to_string(rng.next32()), &F));
     }
 
-    // Fill each bogus block with junk + randomly true/false predicate
     for (int i = 0; i < chainLength; i++) {
         BasicBlock *BB = bogusBlocks[i];
         fillBogusBlock(BB, F, rng);
@@ -332,8 +292,6 @@ static void createBogusChain(BasicBlock *FromBB, BasicBlock *RealTarget,
         auto builder = allPredicateBuilders[rng.nextInRange(0, NUM_PRED_BUILDERS - 1)];
         Value *Cond = builder(B, OV);
 
-        // Randomly negate — makes it impossible to know which branch is "real"
-        // even within the bogus chain (both branches lead to valid destinations)
         bool neg = rng.nextBool();
         if (neg)
             Cond = B.CreateXor(Cond, ConstantInt::getTrue(F.getContext()));
@@ -341,10 +299,7 @@ static void createBogusChain(BasicBlock *FromBB, BasicBlock *RealTarget,
         emitAntiDisasm(B, rng);
 
         if (i + 1 < chainLength) {
-            // Both destinations are valid (RealTarget or next bogus)
-            // Randomly assign which branch goes where
             if (neg) {
-                // Predicate is false: false→next bogus, true→real (or vice versa)
                 if (rng.nextBool())
                     B.CreateCondBr(Cond, RealTarget, bogusBlocks[i + 1]);
                 else
@@ -361,7 +316,6 @@ static void createBogusChain(BasicBlock *FromBB, BasicBlock *RealTarget,
         }
     }
 
-    // Replace FromBB's terminator: anti-disasm → predicate → anti-disasm → branch
     FromBB->getTerminator()->eraseFromParent();
     IRBuilder<> B(FromBB);
 
@@ -372,7 +326,6 @@ static void createBogusChain(BasicBlock *FromBB, BasicBlock *RealTarget,
     auto builder = allPredicateBuilders[rng.nextInRange(0, NUM_PRED_BUILDERS - 1)];
     Value *Cond = builder(B, OV);
 
-    // Randomly negate the predicate (50% chance)
     // If negated: predicate is always-FALSE, so real code goes on false branch
     bool negated = rng.nextBool();
     if (negated)
@@ -386,15 +339,11 @@ static void createBogusChain(BasicBlock *FromBB, BasicBlock *RealTarget,
         B.CreateCondBr(Cond, RealTarget, bogusBlocks[0]);
     }
 
-    // Fix PHI nodes in RealTarget: bogus blocks are new predecessors
     for (auto *BogBB : bogusBlocks) {
         fixPHIsForNewPred(RealTarget, BogBB, FromBB);
     }
 }
 
-// ============================================================================
-// Main pass: split blocks and insert opaque predicate chains
-// ============================================================================
 PreservedAnalyses OpaquePredicatesPass::run(Function &F, FunctionAnalysisManager &AM) {
     if (F.hasFnAttribute(Attribute::OptimizeNone) || F.isDeclaration())
         return PreservedAnalyses::all();
@@ -404,7 +353,6 @@ PreservedAnalyses OpaquePredicatesPass::run(Function &F, FunctionAnalysisManager
 
     bool Changed = false;
 
-    // Collect original blocks (avoid iterator invalidation)
     SmallVector<BasicBlock*, 64> origBlocks;
     for (auto &BB : F)
         origBlocks.push_back(&BB);
@@ -413,19 +361,14 @@ PreservedAnalyses OpaquePredicatesPass::run(Function &F, FunctionAnalysisManager
         if (BB->size() < 2) continue;
         if (!rng.nextBool(0.8)) continue;
 
-        // Determine how many chained opaque gates to insert on the real path
-        // Each gate splits the block and inserts a predicate + bogus chain
-        // The real code passes through gate after gate
-        int numGates = rng.nextInRange(1, 4); // 1-4 sequential gates per block
+        int numGates = rng.nextInRange(1, 4);
 
         BasicBlock *CurrentBB = BB;
         for (int gate = 0; gate < numGates; gate++) {
             if (CurrentBB->size() < 3) break;
 
-            // Skip if block starts with PHI nodes (can't safely split)
             if (isa<PHINode>(CurrentBB->front())) break;
 
-            // Find first non-PHI non-terminator to split at
             Instruction *splitPt = nullptr;
             for (auto &I : *CurrentBB) {
                 if (isa<PHINode>(I) || I.isTerminator()) continue;
@@ -437,7 +380,6 @@ PreservedAnalyses OpaquePredicatesPass::run(Function &F, FunctionAnalysisManager
             BasicBlock *TailBB = CurrentBB->splitBasicBlock(splitPt,
                 "real." + std::to_string(rng.next32()));
 
-            // Skip if tail has PHI nodes (splitBasicBlock can create them)
             if (isa<PHINode>(TailBB->front())) {
                 CurrentBB = TailBB;
                 continue;

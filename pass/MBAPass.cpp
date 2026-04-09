@@ -10,17 +10,12 @@ using namespace llvm;
 
 namespace shroud {
 
-// ============================================================================
-// Fully dynamic MBA IR builder — every instance has unique structure.
-// Randomizes: minterm algebra, term order, noise injection, operand order.
-// ============================================================================
-
 static Value* buildDynamicMBAIR(IRBuilder<> &Builder, const DynamicMBAResult &mba,
                                  Value *X, Value *Y, Type *Ty, ObfRNG &rng) {
     Value *Zero = ConstantInt::get(Ty, 0);
     Value *One = ConstantInt::get(Ty, 1);
 
-    // m3 = x & y — random algebraic form
+    // m3 = x & y
     Value *m3;
     switch (rng.nextInRange(0, 2)) {
     default:
@@ -33,7 +28,7 @@ static Value* buildDynamicMBAIR(IRBuilder<> &Builder, const DynamicMBAResult &mb
     }
     }
 
-    // m2 = x & ~y — random form
+    // m2 = x & ~y
     Value *m2;
     switch (rng.nextInRange(0, 2)) {
     default:
@@ -42,7 +37,7 @@ static Value* buildDynamicMBAIR(IRBuilder<> &Builder, const DynamicMBAResult &mb
     case 2: m2 = Builder.CreateXor(X, Builder.CreateAnd(X, Y)); break;
     }
 
-    // m1 = ~x & y — random form
+    // m1 = ~x & y
     Value *m1;
     switch (rng.nextInRange(0, 2)) {
     default:
@@ -51,7 +46,7 @@ static Value* buildDynamicMBAIR(IRBuilder<> &Builder, const DynamicMBAResult &mb
     case 2: m1 = Builder.CreateXor(Y, Builder.CreateAnd(X, Y)); break;
     }
 
-    // m0 = ~x & ~y — random computation order
+    // m0 = ~x & ~y
     Value *m0;
     switch (rng.nextInRange(0, 2)) {
     default:
@@ -66,7 +61,6 @@ static Value* buildDynamicMBAIR(IRBuilder<> &Builder, const DynamicMBAResult &mb
 
     Value *Minterms[4] = { m0, m1, m2, m3 };
 
-    // Collect and shuffle non-zero terms
     struct Term { int64_t coeff; int basisIdx; };
     SmallVector<Term, 16> terms;
     for (int j = 0; j < 16; j++)
@@ -78,11 +72,9 @@ static Value* buildDynamicMBAIR(IRBuilder<> &Builder, const DynamicMBAResult &mb
         std::swap(terms[i], terms[j]);
     }
 
-    // Build sum with random noise between terms
     Value *Result = Zero;
     bool first = true;
     for (auto &t : terms) {
-        // Build basis from minterms in random order
         Value *BasisVal = Zero;
         bool bFirst = true;
         int bits[4] = {0, 1, 2, 3};
@@ -99,7 +91,7 @@ static Value* buildDynamicMBAIR(IRBuilder<> &Builder, const DynamicMBAResult &mb
         Value *Coeff = ConstantInt::get(Ty, (uint64_t)t.coeff);
         Value *TermVal = Builder.CreateMul(Coeff, BasisVal);
 
-        // Random noise: (expr - expr) = 0 (low prob to control size)
+        // Noise injection: (expr - expr) = 0
         if (rng.nextBool(0.1)) {
             Value *NC = ConstantInt::get(Ty, rng.next32());
             Value *Noise;
@@ -169,7 +161,6 @@ PreservedAnalyses MBAPass::run(Function &F, FunctionAnalysisManager &AM) {
         }
     }
 
-    // Constant obfuscation
     if (!AuxVar) {
         for (auto &Arg : F.args()) {
             if (Arg.getType()->isIntegerTy(32)) { AuxVar = &Arg; break; }

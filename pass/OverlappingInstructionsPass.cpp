@@ -13,12 +13,7 @@ using namespace llvm;
 
 namespace shroud {
 
-// ============================================================================
-// Dynamic anti-disassembly generator.
-// Every pattern is unique: random register, random opaque condition,
-// random rogue bytes, random dead-path junk. No two instances are identical
-// so signature-based stripping is impossible.
-// ============================================================================
+// Dynamic anti-disassembly generator — every instance is unique.
 
 static const char* gpr32_intel[] = {
     "eax", "ebx", "ecx", "edx", "esi", "edi"
@@ -28,31 +23,21 @@ static const char* gpr32_att[] = {
 };
 static constexpr int NUM_GPR32 = 6;
 
-// All usable clobber names for the register set
 static const char* clobberNames[] = {
     "eax", "ebx", "ecx", "edx", "esi", "edi"
 };
 
-// Generate a random rogue byte sequence (1-8 bytes)
-// Uses opcodes that consume following bytes as operands when decoded linearly:
-//   E8 = CALL rel32 (swallows 4 bytes)
-//   E9 = JMP rel32 (swallows 4 bytes)
-//   68 = PUSH imm32 (swallows 4 bytes)
-//   48 B8 = MOV RAX, imm64 (swallows 8 bytes)
-//   FF 15 = CALL [rip+disp32] (swallows 4 bytes)
-//   48 C7 C0 = MOV RAX, imm32 (swallows 4 bytes)
-//   0F 0B = UD2 (2 bytes, crashes if reached)
-//   CC = INT3 (1 byte)
+// Rogue byte sequences — opcodes that swallow following bytes when decoded linearly.
 static std::string generateRogueBytes(ObfRNG &rng) {
     std::ostringstream ss;
     int choice = rng.nextInRange(0, 8);
     switch (choice) {
-    case 0: // CALL rel32 (swallows 4 bytes after it)
+    case 0: // CALL rel32
         ss << "0xE8";
         for (int i = 0; i < rng.nextInRange(0, 3); i++)
             ss << ", 0x" << std::hex << rng.nextInRange(0, 255);
         break;
-    case 1: // JMP rel32 (swallows 4)
+    case 1: // JMP rel32
         ss << "0xE9";
         for (int i = 0; i < rng.nextInRange(0, 3); i++)
             ss << ", 0x" << std::hex << rng.nextInRange(0, 255);
@@ -62,7 +47,7 @@ static std::string generateRogueBytes(ObfRNG &rng) {
         for (int i = 0; i < rng.nextInRange(0, 3); i++)
             ss << ", 0x" << std::hex << rng.nextInRange(0, 255);
         break;
-    case 3: // MOV RAX, imm64 (REX.W + B8)
+    case 3: // REX.W MOV RAX, imm64
         ss << "0x48, 0xB8";
         for (int i = 0; i < rng.nextInRange(0, 5); i++)
             ss << ", 0x" << std::hex << rng.nextInRange(0, 255);
@@ -72,7 +57,7 @@ static std::string generateRogueBytes(ObfRNG &rng) {
         for (int i = 0; i < rng.nextInRange(0, 3); i++)
             ss << ", 0x" << std::hex << rng.nextInRange(0, 255);
         break;
-    case 5: // MOV RAX, imm32 (REX.W + C7 C0)
+    case 5: // REX.W MOV RAX, imm32
         ss << "0x48, 0xC7, 0xC0";
         for (int i = 0; i < rng.nextInRange(1, 4); i++)
             ss << ", 0x" << std::hex << rng.nextInRange(0, 255);
@@ -86,7 +71,7 @@ static std::string generateRogueBytes(ObfRNG &rng) {
             ss << "0xCC";
         }
         break;
-    case 8: // LEA reg, [rip+disp32] (swallows 4)
+    case 8: // LEA reg, [rip+disp32]
         ss << "0x48, 0x8D, 0x05";
         for (int i = 0; i < rng.nextInRange(1, 4); i++)
             ss << ", 0x" << std::hex << rng.nextInRange(0, 255);
@@ -95,19 +80,15 @@ static std::string generateRogueBytes(ObfRNG &rng) {
     return ss.str();
 }
 
-// Build a dynamically-generated anti-disasm pattern.
-// Returns: { asmString, clobberString }
 static std::pair<std::string, std::string>
 generateDynamicPattern(ObfRNG &rng, bool intel) {
     std::ostringstream asm_ss;
     std::ostringstream clob_ss;
 
-    // Pick a random scratch register
     int regIdx = rng.nextInRange(0, NUM_GPR32 - 1);
     const char *reg = intel ? gpr32_intel[regIdx] : gpr32_att[regIdx];
     const char *clobber = clobberNames[regIdx];
 
-    // Weighted selection: 40% NOP control flow, 30% NOP overlap, 30% standard
     int strategy;
     int roll = rng.nextInRange(0, 99);
     if (roll < 40)
@@ -117,13 +98,11 @@ generateDynamicPattern(ObfRNG &rng, bool intel) {
     else
         strategy = rng.nextInRange(0, 9);        // standard (0-9)
 
-    // Generate unique label names to avoid collisions
     static uint32_t labelCounter = 0;
     uint32_t labelId = labelCounter++;
     std::string L1 = ".Ls" + std::to_string(labelId) + "a";
     std::string L2 = ".Ls" + std::to_string(labelId) + "b";
 
-    // Generate random rogue bytes for the dead path
     std::string rogue = generateRogueBytes(rng);
 
     switch (strategy) {
@@ -243,25 +222,14 @@ generateDynamicPattern(ObfRNG &rng, bool intel) {
         break;
     }
 
-    // ================================================================
-    // EXOTIC NOP OVERLAP WITH REAL INSTRUCTIONS
-    //
-    // The displacement field of exotic NOPs contains REAL instructions
-    // that perform actual register computation (using clobbered regs).
-    // Linear disasm sees one 8-byte NOP. Execution JMPs into byte 4
-    // and runs real code that's indistinguishable from the program.
-    //
+    // Exotic NOP overlap: real instructions hidden in NOP displacement field.
     // Format: [0F NN 84 00] [4 bytes of real instructions]
-    //          NOP header    displacement = valid code
-    // ================================================================
 
     case 10: {
-        // Hidden real instructions inside exotic NOP — use asm mnemonics not raw bytes
         uint8_t nopOp = 0x19 + rng.nextInRange(0, 6);
         asm_ss << "jmp " << L1 << "\n";
         asm_ss << ".byte 0x0F, 0x" << std::hex << (int)nopOp << ", 0x84, 0x00\n";
         asm_ss << L1 << ":\n";
-        // Use asm mnemonics — assembler handles encoding correctly
         if (intel) asm_ss << "xor " << reg << ", " << reg << "\n";
         else       asm_ss << "xorl " << reg << ", " << reg << "\n";
         asm_ss << "nop\nnop\n"; // pad to ensure NOP header bytes consumed
@@ -269,7 +237,6 @@ generateDynamicPattern(ObfRNG &rng, bool intel) {
         break;
     }
     case 11: {
-        // Hidden: ADD reg, random + NOP inside exotic NOP
         uint8_t nopOp = 0x19 + rng.nextInRange(0, 6);
         uint32_t imm = rng.nextInRange(1, 127);
         if (intel) asm_ss << "xor " << reg << ", " << reg << "\n";
@@ -283,7 +250,6 @@ generateDynamicPattern(ObfRNG &rng, bool intel) {
         break;
     }
     case 12: {
-        // Hidden: SUB reg, random inside exotic NOP
         uint8_t nopOp = 0x19 + rng.nextInRange(0, 6);
         uint32_t imm = rng.nextInRange(1, 127);
         asm_ss << "jmp " << L1 << "\n";
@@ -295,7 +261,6 @@ generateDynamicPattern(ObfRNG &rng, bool intel) {
         break;
     }
     case 13: {
-        // Hidden: XOR reg, random inside exotic NOP
         uint8_t nopOp = 0x19 + rng.nextInRange(0, 6);
         uint32_t imm = rng.nextInRange(1, 255);
         if (intel) asm_ss << "sub " << reg << ", " << reg << "\n";
@@ -310,9 +275,8 @@ generateDynamicPattern(ObfRNG &rng, bool intel) {
         break;
     }
     case 14: {
-        // Hidden: ADD reg,reg; SUB reg,reg (cancel) after ENDBR64
         asm_ss << "jmp " << L1 << "\n";
-        asm_ss << ".byte 0xF3, 0x0F, 0x1E, 0xFA\n";
+        asm_ss << ".byte 0xF3, 0x0F, 0x1E, 0xFA\n"; // ENDBR64
         asm_ss << ".byte 0xE8\n";
         asm_ss << L1 << ":\n";
         if (intel) {
@@ -326,57 +290,32 @@ generateDynamicPattern(ObfRNG &rng, bool intel) {
         break;
     }
 
-    // ================================================================
-    // NOP AS CONTROL FLOW: the exotic NOP IS the branch between real code.
-    //
-    // Execution enters the asm block, JMPs over the NOP header,
-    // lands in the displacement field where a JMP targets the exit
-    // label at the bottom. The assembler resolves the relative offset.
-    // Linear disasm sees ONE instruction (8-byte NOP). Real execution
-    // traverses through the NOP's displacement to reach the exit.
-    //
-    // This makes the NOP a load-bearing part of the CFG — removing it
-    // severs the control flow edge and breaks the program.
-    //
-    //   entry:
-    //     jmp .Ldisp          ; skip NOP header (2 bytes)
-    //     .byte 0F NN 84 00   ; NOP header (dead, 4 bytes)
-    //   .Ldisp:               ; inside NOP displacement field
-    //     jmp .Lexit          ; displacement bytes = JMP to exit
-    //     .byte pad, pad      ; rest of displacement (dead after JMP)
-    //   .Lexit:               ; LLVM continues real code here
-    // ================================================================
+    // NOP as control flow: JMP through displacement field makes the NOP load-bearing.
+    // Removing the NOP severs the CFG edge.
 
     case 15: {
-        // Exotic NOP as control flow bridge — JMP through displacement to exit
         uint8_t nopOp = 0x19 + rng.nextInRange(0, 6);
         std::string Lexit = ".Ls" + std::to_string(labelCounter++) + "x";
         asm_ss << "jmp " << L1 << "\n";
         asm_ss << ".byte 0x0F, 0x" << std::hex << (int)nopOp << ", 0x84, 0x00\n";
         asm_ss << L1 << ":\n";
-        // JMP to the exit label — assembler computes the relative offset
-        // This JMP's encoding becomes the NOP's displacement bytes
         asm_ss << "jmp " << Lexit << "\n";
-        // Padding bytes (dead — JMP skips them, but they complete the NOP's displacement)
         asm_ss << ".byte 0x" << std::hex << rng.nextInRange(0,255)
                << ", 0x" << std::hex << rng.nextInRange(0,255) << "\n";
         asm_ss << Lexit << ":\n";
         break;
     }
     case 16: {
-        // Double NOP bridge: JMP through TWO nested exotic NOPs to reach exit
         uint8_t nopOp1 = 0x19 + rng.nextInRange(0, 6);
         uint8_t nopOp2 = 0x19 + rng.nextInRange(0, 6);
         std::string Lmid = ".Ls" + std::to_string(labelCounter++) + "m";
         std::string Lexit = ".Ls" + std::to_string(labelCounter++) + "x";
-        // First NOP bridge
         asm_ss << "jmp " << L1 << "\n";
         asm_ss << ".byte 0x0F, 0x" << std::hex << (int)nopOp1 << ", 0x84, 0x00\n";
         asm_ss << L1 << ":\n";
         asm_ss << "jmp " << Lmid << "\n";
         asm_ss << ".byte 0x" << std::hex << rng.nextInRange(0,255)
                << ", 0x" << std::hex << rng.nextInRange(0,255) << "\n";
-        // Second NOP bridge
         asm_ss << ".byte 0x0F, 0x" << std::hex << (int)nopOp2 << ", 0x84, 0x00\n";
         asm_ss << Lmid << ":\n";
         asm_ss << "jmp " << Lexit << "\n";
@@ -386,14 +325,12 @@ generateDynamicPattern(ObfRNG &rng, bool intel) {
         break;
     }
     case 17: {
-        // NOP bridge with real computation: JMP into NOP, compute, JMP to exit
         uint8_t nopOp = 0x19 + rng.nextInRange(0, 6);
         std::string Lexit = ".Ls" + std::to_string(labelCounter++) + "x";
         uint32_t imm = rng.nextInRange(1, 127);
         asm_ss << "jmp " << L1 << "\n";
         asm_ss << ".byte 0x0F, 0x" << std::hex << (int)nopOp << ", 0x84, 0x00\n";
         asm_ss << L1 << ":\n";
-        // Real computation then JMP to exit
         if (intel)
             asm_ss << "xor " << reg << ", " << reg << "\n"
                    << "add " << reg << ", " << std::dec << imm << "\n";
@@ -401,7 +338,6 @@ generateDynamicPattern(ObfRNG &rng, bool intel) {
             asm_ss << "xorl " << reg << ", " << reg << "\n"
                    << "addl $$" << std::dec << imm << ", " << reg << "\n";
         asm_ss << "jmp " << Lexit << "\n";
-        // Dead padding (completes NOP displacement for linear disasm)
         asm_ss << ".byte 0x" << std::hex << rng.nextInRange(0,255)
                << ", 0x" << std::hex << rng.nextInRange(0,255)
                << ", 0x" << std::hex << rng.nextInRange(0,255) << "\n";
@@ -409,7 +345,6 @@ generateDynamicPattern(ObfRNG &rng, bool intel) {
         break;
     }
     case 18: {
-        // Triple NOP chain: thread through 3 exotic NOPs
         std::string Lm1 = ".Ls" + std::to_string(labelCounter++) + "m";
         std::string Lm2 = ".Ls" + std::to_string(labelCounter++) + "m";
         std::string Lexit = ".Ls" + std::to_string(labelCounter++) + "x";
@@ -430,7 +365,6 @@ generateDynamicPattern(ObfRNG &rng, bool intel) {
         break;
     }
     case 19: {
-        // NOP bridge with opaque predicate: XOR+JZ through NOP to exit
         uint8_t nopOp = 0x19 + rng.nextInRange(0, 6);
         std::string Lexit = ".Ls" + std::to_string(labelCounter++) + "x";
         if (intel) asm_ss << "xor " << reg << ", " << reg << "\n";
@@ -443,7 +377,6 @@ generateDynamicPattern(ObfRNG &rng, bool intel) {
         break;
     }
     case 20: {
-        // ENDBR64 bridge: thread through CET NOP to exit
         std::string Lexit = ".Ls" + std::to_string(labelCounter++) + "x";
         asm_ss << "jmp " << L1 << "\n";
         asm_ss << ".byte 0xF3, 0x0F, 0x1E, 0xFA\n"; // ENDBR64
@@ -453,7 +386,6 @@ generateDynamicPattern(ObfRNG &rng, bool intel) {
         break;
     }
     case 21: {
-        // NOP bridge with SUB opaque + computation
         uint8_t nopOp = 0x19 + rng.nextInRange(0, 6);
         std::string Lexit = ".Ls" + std::to_string(labelCounter++) + "x";
         uint32_t imm = rng.nextInRange(1, 200);
@@ -470,14 +402,12 @@ generateDynamicPattern(ObfRNG &rng, bool intel) {
         break;
     }
     case 22: {
-        // NOP bridge with prefix-padded NOP inside displacement
         uint8_t nopOp = 0x19 + rng.nextInRange(0, 6);
         std::string Lexit = ".Ls" + std::to_string(labelCounter++) + "x";
         int numPfx = rng.nextInRange(2, 4);
         asm_ss << "jmp " << L1 << "\n";
         asm_ss << ".byte 0x0F, 0x" << std::hex << (int)nopOp << ", 0x84, 0x00\n";
         asm_ss << L1 << ":\n";
-        // Prefix-padded NOP inside the displacement
         asm_ss << ".byte ";
         for (int i = 0; i < numPfx; i++) asm_ss << "0x66, ";
         asm_ss << "0x90\n";
@@ -488,13 +418,11 @@ generateDynamicPattern(ObfRNG &rng, bool intel) {
     }
     }
 
-    // Build clobber string
     clob_ss << "~{" << clobber << "},~{cc},~{dirflag},~{fpsr},~{flags}";
 
     return { asm_ss.str(), clob_ss.str() };
 }
 
-// Generate a random exotic NOP with varying bytes
 static std::string generateExoticNop(ObfRNG &rng) {
     std::ostringstream ss;
     int choice = rng.nextInRange(0, 9);
@@ -570,7 +498,6 @@ PreservedAnalyses OverlappingInstructionsPass::run(Function &F, FunctionAnalysis
         Instruction *insertPt = BB.getFirstNonPHI();
         if (!insertPt || insertPt->isTerminator()) continue;
 
-        // 1-3 dynamic anti-disasm patterns per block
         int numInsert = rng.nextInRange(1, 3);
         for (int p = 0; p < numInsert; p++) {
             if (!rng.nextBool(0.7)) continue;
@@ -584,7 +511,6 @@ PreservedAnalyses OverlappingInstructionsPass::run(Function &F, FunctionAnalysis
             Changed = true;
         }
 
-        // Scatter exotic NOPs (same raw .byte syntax for both dialects)
         if (rng.nextBool(0.4)) {
             std::string nop = generateExoticNop(rng);
             IRBuilder<> Builder(insertPt);
@@ -595,7 +521,6 @@ PreservedAnalyses OverlappingInstructionsPass::run(Function &F, FunctionAnalysis
             Changed = true;
         }
 
-        // Also before terminators
         Instruction *term = BB.getTerminator();
         if (term && (isa<BranchInst>(term) || isa<SwitchInst>(term))) {
             if (rng.nextBool(0.5)) {
