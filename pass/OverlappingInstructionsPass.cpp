@@ -107,8 +107,8 @@ generateDynamicPattern(ObfRNG &rng, bool intel) {
     const char *reg = intel ? gpr32_intel[regIdx] : gpr32_att[regIdx];
     const char *clobber = clobberNames[regIdx];
 
-    // Pick an opaque condition strategy (0-9 = standard, 10-14 = exotic NOP overlap)
-    int strategy = rng.nextInRange(0, 14);
+    // 0-9 = standard, 10-14 = NOP overlap with real code, 15-17 = NOP AS control flow
+    int strategy = rng.nextInRange(0, 17);
 
     // Generate unique label names to avoid collisions
     static uint32_t labelCounter = 0;
@@ -316,6 +316,89 @@ generateDynamicPattern(ObfRNG &rng, bool intel) {
             asm_ss << "subl " << reg << ", " << reg << "\n";
         }
         asm_ss << L2 << ":\n";
+        break;
+    }
+
+    // ================================================================
+    // NOP AS CONTROL FLOW: the exotic NOP IS the branch between real code.
+    //
+    // Execution enters the asm block, JMPs over the NOP header,
+    // lands in the displacement field where a JMP targets the exit
+    // label at the bottom. The assembler resolves the relative offset.
+    // Linear disasm sees ONE instruction (8-byte NOP). Real execution
+    // traverses through the NOP's displacement to reach the exit.
+    //
+    // This makes the NOP a load-bearing part of the CFG — removing it
+    // severs the control flow edge and breaks the program.
+    //
+    //   entry:
+    //     jmp .Ldisp          ; skip NOP header (2 bytes)
+    //     .byte 0F NN 84 00   ; NOP header (dead, 4 bytes)
+    //   .Ldisp:               ; inside NOP displacement field
+    //     jmp .Lexit          ; displacement bytes = JMP to exit
+    //     .byte pad, pad      ; rest of displacement (dead after JMP)
+    //   .Lexit:               ; LLVM continues real code here
+    // ================================================================
+
+    case 15: {
+        // Exotic NOP as control flow bridge — JMP through displacement to exit
+        uint8_t nopOp = 0x19 + rng.nextInRange(0, 6);
+        std::string Lexit = ".Ls" + std::to_string(labelCounter++) + "x";
+        asm_ss << "jmp " << L1 << "\n";
+        asm_ss << ".byte 0x0F, 0x" << std::hex << (int)nopOp << ", 0x84, 0x00\n";
+        asm_ss << L1 << ":\n";
+        // JMP to the exit label — assembler computes the relative offset
+        // This JMP's encoding becomes the NOP's displacement bytes
+        asm_ss << "jmp " << Lexit << "\n";
+        // Padding bytes (dead — JMP skips them, but they complete the NOP's displacement)
+        asm_ss << ".byte 0x" << std::hex << rng.nextInRange(0,255)
+               << ", 0x" << std::hex << rng.nextInRange(0,255) << "\n";
+        asm_ss << Lexit << ":\n";
+        break;
+    }
+    case 16: {
+        // Double NOP bridge: JMP through TWO nested exotic NOPs to reach exit
+        uint8_t nopOp1 = 0x19 + rng.nextInRange(0, 6);
+        uint8_t nopOp2 = 0x19 + rng.nextInRange(0, 6);
+        std::string Lmid = ".Ls" + std::to_string(labelCounter++) + "m";
+        std::string Lexit = ".Ls" + std::to_string(labelCounter++) + "x";
+        // First NOP bridge
+        asm_ss << "jmp " << L1 << "\n";
+        asm_ss << ".byte 0x0F, 0x" << std::hex << (int)nopOp1 << ", 0x84, 0x00\n";
+        asm_ss << L1 << ":\n";
+        asm_ss << "jmp " << Lmid << "\n";
+        asm_ss << ".byte 0x" << std::hex << rng.nextInRange(0,255)
+               << ", 0x" << std::hex << rng.nextInRange(0,255) << "\n";
+        // Second NOP bridge
+        asm_ss << ".byte 0x0F, 0x" << std::hex << (int)nopOp2 << ", 0x84, 0x00\n";
+        asm_ss << Lmid << ":\n";
+        asm_ss << "jmp " << Lexit << "\n";
+        asm_ss << ".byte 0x" << std::hex << rng.nextInRange(0,255)
+               << ", 0x" << std::hex << rng.nextInRange(0,255) << "\n";
+        asm_ss << Lexit << ":\n";
+        break;
+    }
+    case 17: {
+        // NOP bridge with real computation: JMP into NOP, compute, JMP to exit
+        uint8_t nopOp = 0x19 + rng.nextInRange(0, 6);
+        std::string Lexit = ".Ls" + std::to_string(labelCounter++) + "x";
+        uint32_t imm = rng.nextInRange(1, 127);
+        asm_ss << "jmp " << L1 << "\n";
+        asm_ss << ".byte 0x0F, 0x" << std::hex << (int)nopOp << ", 0x84, 0x00\n";
+        asm_ss << L1 << ":\n";
+        // Real computation then JMP to exit
+        if (intel)
+            asm_ss << "xor " << reg << ", " << reg << "\n"
+                   << "add " << reg << ", " << std::dec << imm << "\n";
+        else
+            asm_ss << "xorl " << reg << ", " << reg << "\n"
+                   << "addl $$" << std::dec << imm << ", " << reg << "\n";
+        asm_ss << "jmp " << Lexit << "\n";
+        // Dead padding (completes NOP displacement for linear disasm)
+        asm_ss << ".byte 0x" << std::hex << rng.nextInRange(0,255)
+               << ", 0x" << std::hex << rng.nextInRange(0,255)
+               << ", 0x" << std::hex << rng.nextInRange(0,255) << "\n";
+        asm_ss << Lexit << ":\n";
         break;
     }
     }
