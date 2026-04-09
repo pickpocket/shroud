@@ -8,6 +8,7 @@
 #include "llvm/IR/Constants.h"
 #include "llvm/IR/InlineAsm.h"
 #include "llvm/IR/Module.h"
+#include <sstream>
 #include "llvm/TargetParser/Triple.h"
 
 using namespace llvm;
@@ -121,37 +122,13 @@ static Value* buildPredicate_RotateRT(IRBuilder<> &B, Value *X) {
 }
 
 // ============================================================================
-// Anti-disassembly inline asm patterns (safe to execute on x86)
+// Dynamic anti-disassembly — every instance is unique
+// Uses the same generator as OverlappingInstructionsPass
 // ============================================================================
-// Hard anti-disasm: Intel syntax (MSVC target) with opaque conditions
-static const char* antiDisasmIntel[] = {
-    "xor eax, eax\n jz 1f\n .byte 0xE8\n 1:\n",
-    "sub edx, edx\n jnz 1f\n jmp 2f\n 1: .byte 0xE9\n 2:\n",
-    "stc\n jnc 1f\n jmp 2f\n 1: .byte 0x48, 0xB8\n 2:\n",
-    "clc\n jc 1f\n jmp 2f\n 1: .byte 0xE8, 0xDE, 0xAD\n 2:\n",
-    "mov eax, 1\n test eax, eax\n jz 1f\n jmp 2f\n 1: .byte 0x0F, 0x0B\n 2:\n",
-    "xor eax, eax\n jz 1f\n .byte 0xCC, 0xCC, 0xE8\n 1:\n",
-    "jmp 1f\n .byte 0x48, 0xC7, 0xC0, 0xDE, 0xAD, 0xBE, 0xEF\n 1:\n",
-    "xor ecx, ecx\n test ecx, ecx\n jz 2f\n jnz 2f\n .byte 0xE8, 0x48, 0x89\n 2:\n",
-    ".byte 0x0F, 0x19, 0xC0",
-    ".byte 0x0F, 0x1D, 0x84, 0xDB, 0x78, 0x56, 0x34, 0x12",
-    ".byte 0xF3, 0x0F, 0x1E, 0xFA",
-};
-// AT&T syntax (GNU target)
-static const char* antiDisasmATT[] = {
-    "xorl %eax, %eax\n jz 1f\n .byte 0xE8\n 1:\n",
-    "subl %edx, %edx\n jnz 1f\n jmp 2f\n 1: .byte 0xE9\n 2:\n",
-    "stc\n jnc 1f\n jmp 2f\n 1: .byte 0x48, 0xB8\n 2:\n",
-    "clc\n jc 1f\n jmp 2f\n 1: .byte 0xE8, 0xDE, 0xAD\n 2:\n",
-    "movl $$1, %eax\n testl %eax, %eax\n jz 1f\n jmp 2f\n 1: .byte 0x0F, 0x0B\n 2:\n",
-    "xorl %eax, %eax\n jz 1f\n .byte 0xCC, 0xCC, 0xE8\n 1:\n",
-    "jmp 1f\n .byte 0x48, 0xC7, 0xC0, 0xDE, 0xAD, 0xBE, 0xEF\n 1:\n",
-    "xorl %ecx, %ecx\n testl %ecx, %ecx\n jz 2f\n jnz 2f\n .byte 0xE8, 0x48, 0x89\n 2:\n",
-    ".byte 0x0F, 0x19, 0xC0",
-    ".byte 0x0F, 0x1D, 0x84, 0xDB, 0x78, 0x56, 0x34, 0x12",
-    ".byte 0xF3, 0x0F, 0x1E, 0xFA",
-};
-static constexpr int NUM_ANTIDIS = sizeof(antiDisasmIntel) / sizeof(antiDisasmIntel[0]);
+
+static const char* opqRegs_intel[] = { "eax","ebx","ecx","edx","esi","edi" };
+static const char* opqRegs_att[]   = { "%eax","%ebx","%ecx","%edx","%esi","%edi" };
+static const char* opqClobbers[]   = { "eax","ebx","ecx","edx","esi","edi" };
 
 static bool isIntelTarget(Function &F) {
     Triple TT(F.getParent()->getTargetTriple());
@@ -161,13 +138,68 @@ static bool isIntelTarget(Function &F) {
 static void emitAntiDisasm(IRBuilder<> &B, ObfRNG &rng) {
     Function *F = B.GetInsertBlock()->getParent();
     bool intel = isIntelTarget(*F);
+
+    int regIdx = rng.nextInRange(0, 5);
+    const char *reg = intel ? opqRegs_intel[regIdx] : opqRegs_att[regIdx];
+    static uint32_t labelCounter = 0;
+    uint32_t labelId = labelCounter++;
+    std::string L1 = ".Lo" + std::to_string(labelId) + "a";
+    std::string L2 = ".Lo" + std::to_string(labelId) + "b";
+
+    // Random rogue bytes
+    std::ostringstream rogue;
+    int rogueTy = rng.nextInRange(0, 4);
+    const char* rogueStarts[] = {"0xE8","0xE9","0x68","0x48, 0xB8","0xFF, 0x15"};
+    rogue << rogueStarts[rogueTy];
+    for (int i = 0; i < rng.nextInRange(1, 4); i++)
+        rogue << ", 0x" << std::hex << rng.nextInRange(0, 255);
+
+    // Build dynamic asm
+    std::ostringstream ss;
+    int strategy = rng.nextInRange(0, 6);
+    switch (strategy) {
+    case 0:
+        if (intel) ss << "xor " << reg << ", " << reg << "\n";
+        else       ss << "xorl " << reg << ", " << reg << "\n";
+        ss << "jz " << L1 << "\n .byte " << rogue.str() << "\n" << L1 << ":\n";
+        break;
+    case 1:
+        if (intel) ss << "sub " << reg << ", " << reg << "\n";
+        else       ss << "subl " << reg << ", " << reg << "\n";
+        ss << "jnz " << L1 << "\njmp " << L2 << "\n"
+           << L1 << ": .byte " << rogue.str() << "\n" << L2 << ":\n";
+        break;
+    case 2:
+        ss << "stc\njnc " << L1 << "\njmp " << L2 << "\n"
+           << L1 << ": .byte " << rogue.str() << "\n" << L2 << ":\n";
+        break;
+    case 3:
+        ss << "clc\njc " << L1 << "\njmp " << L2 << "\n"
+           << L1 << ": .byte " << rogue.str() << "\n" << L2 << ":\n";
+        break;
+    case 4: {
+        uint32_t imm = rng.nextInRange(1, 0x7FFFFFFF);
+        if (intel) ss << "mov " << reg << ", " << imm << "\ntest " << reg << ", " << reg << "\n";
+        else       ss << "movl $$" << imm << ", " << reg << "\ntestl " << reg << ", " << reg << "\n";
+        ss << "jz " << L1 << "\njmp " << L2 << "\n"
+           << L1 << ": .byte " << rogue.str() << "\n" << L2 << ":\n";
+        break;
+    }
+    case 5:
+        if (intel) ss << "and " << reg << ", 0\n";
+        else       ss << "andl $$0, " << reg << "\n";
+        ss << "jnz " << L1 << "\njmp " << L2 << "\n"
+           << L1 << ": .byte " << rogue.str() << "\n" << L2 << ":\n";
+        break;
+    case 6:
+        ss << "jmp " << L1 << "\n .byte " << rogue.str() << "\n" << L1 << ":\n";
+        break;
+    }
+
+    std::string clobStr = std::string("~{") + opqClobbers[regIdx] + "},~{cc},~{dirflag},~{fpsr},~{flags}";
     FunctionType *VoidFTy = FunctionType::get(Type::getVoidTy(B.getContext()), false);
-    int idx = rng.nextInRange(0, NUM_ANTIDIS - 1);
-    const char *pat = intel ? antiDisasmIntel[idx] : antiDisasmATT[idx];
-    InlineAsm *IA = InlineAsm::get(VoidFTy, pat,
-        "~{eax},~{ecx},~{edx},~{cc},~{dirflag},~{fpsr},~{flags}",
-        /*hasSideEffects=*/true, /*isAlignStack=*/false,
-        intel ? InlineAsm::AD_Intel : InlineAsm::AD_ATT);
+    InlineAsm *IA = InlineAsm::get(VoidFTy, ss.str(), clobStr,
+        true, false, intel ? InlineAsm::AD_Intel : InlineAsm::AD_ATT);
     B.CreateCall(IA);
 }
 
