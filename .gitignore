@@ -1,0 +1,42 @@
+# Build directories
+build/
+build2/
+build-msvc/
+CMakeFiles/
+cmake_install.cmake
+CMakeCache.txt
+compile_commands.json
+build.ninja
+.ninja_log
+.ninja_deps
+
+# Build artifacts
+*.o
+*.obj
+*.a
+*.lib
+*.dll
+*.exe
+*.so
+*.dylib
+*.pdb
+*.ilk
+*.exp
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# LLVM dev (large downloads)
+/c/llvm-dev/
+
+# Generated test files
+Testing/
+_deps/
