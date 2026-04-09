@@ -91,11 +91,11 @@ generateDynamicPattern(ObfRNG &rng, bool intel) {
 
     int strategy;
     int roll = rng.nextInRange(0, 99);
-    if (roll < 30)
-        strategy = 23 + rng.nextInRange(0, 7);  // 15-byte NOP opaque (23-30)
-    else if (roll < 55)
+    if (roll < 25)
+        strategy = 23 + rng.nextInRange(0, 11); // 15-byte NOP opaque + delayed traps (23-34)
+    else if (roll < 50)
         strategy = 15 + rng.nextInRange(0, 7);  // NOP control flow (15-22)
-    else if (roll < 75)
+    else if (roll < 70)
         strategy = 10 + rng.nextInRange(0, 4);  // NOP overlap (10-14)
     else
         strategy = rng.nextInRange(0, 9);        // standard (0-9)
@@ -437,7 +437,7 @@ generateDynamicPattern(ObfRNG &rng, bool intel) {
         uint8_t xorModRM[] = {0xC0,0xC9,0xD2,0xDB,0xF6,0xFF}; // EAX..EDI
         uint8_t modrm = xorModRM[regIdx];
         std::string Lexit = ".Ls" + std::to_string(labelCounter++) + "x";
-        asm_ss << "jmp " << L1 << "\n";
+        asm_ss << "jmp " << Lexit << "\n";
         asm_ss << ".byte 0x66, 0x66, 0x66, 0x66, 0x66, 0x66, 0x66\n"; // 7 prefixes
         asm_ss << ".byte 0x0F, 0x1F, 0x84, 0x00\n";                    // NOP opcode+ModRM+SIB
         asm_ss << L1 << ":\n";                                          // byte 11: displacement
@@ -452,7 +452,7 @@ generateDynamicPattern(ObfRNG &rng, bool intel) {
         uint8_t subModRM[] = {0xC0,0xC9,0xD2,0xDB,0xF6,0xFF};
         uint8_t modrm = subModRM[regIdx];
         std::string Lexit = ".Ls" + std::to_string(labelCounter++) + "x";
-        asm_ss << "jmp " << L1 << "\n";
+        asm_ss << "jmp " << Lexit << "\n";
         asm_ss << ".byte 0x66, 0x66, 0x66, 0x66, 0x66, 0x66, 0x66\n";
         asm_ss << ".byte 0x0F, 0x1F, 0x84, 0x00\n";
         asm_ss << L1 << ":\n";
@@ -467,7 +467,7 @@ generateDynamicPattern(ObfRNG &rng, bool intel) {
         uint8_t xorModRM[] = {0xC0,0xC9,0xD2,0xDB,0xF6,0xFF};
         uint8_t modrm = xorModRM[regIdx];
         std::string Lexit = ".Ls" + std::to_string(labelCounter++) + "x";
-        asm_ss << "jmp " << L1 << "\n";
+        asm_ss << "jmp " << Lexit << "\n";
         asm_ss << ".byte 0x66, 0x66, 0x66, 0x66, 0x66, 0x66, 0x66\n";
         asm_ss << ".byte 0x0F, 0x1F, 0x84, 0x00\n";
         asm_ss << L1 << ":\n";
@@ -482,7 +482,7 @@ generateDynamicPattern(ObfRNG &rng, bool intel) {
         uint8_t xorModRM[] = {0xC0,0xC9,0xD2,0xDB,0xF6,0xFF};
         uint8_t modrm = xorModRM[regIdx];
         std::string Lexit = ".Ls" + std::to_string(labelCounter++) + "x";
-        asm_ss << "jmp " << L1 << "\n";
+        asm_ss << "jmp " << Lexit << "\n";
         asm_ss << ".byte 0x66, 0x66, 0x66, 0x66, 0x66, 0x66, 0x66\n";
         asm_ss << ".byte 0x0F, 0x1F, 0x84, 0x00\n";
         asm_ss << L1 << ":\n";
@@ -495,7 +495,7 @@ generateDynamicPattern(ObfRNG &rng, bool intel) {
     case 27: {
         // STC (CF=1) + JC +1 over HLT, inside 15-byte NOP
         std::string Lexit = ".Ls" + std::to_string(labelCounter++) + "x";
-        asm_ss << "jmp " << L1 << "\n";
+        asm_ss << "jmp " << Lexit << "\n";
         asm_ss << ".byte 0x66, 0x66, 0x66, 0x66, 0x66, 0x66, 0x66\n";
         asm_ss << ".byte 0x0F, 0x1F, 0x84, 0x00\n";
         asm_ss << L1 << ":\n";
@@ -508,7 +508,7 @@ generateDynamicPattern(ObfRNG &rng, bool intel) {
     case 28: {
         // CLC (CF=0) + JNC +1 over INT3, inside 15-byte NOP
         std::string Lexit = ".Ls" + std::to_string(labelCounter++) + "x";
-        asm_ss << "jmp " << L1 << "\n";
+        asm_ss << "jmp " << Lexit << "\n";
         asm_ss << ".byte 0x66, 0x66, 0x66, 0x66, 0x66, 0x66, 0x66\n";
         asm_ss << ".byte 0x0F, 0x1F, 0x84, 0x00\n";
         asm_ss << L1 << ":\n";
@@ -524,7 +524,7 @@ generateDynamicPattern(ObfRNG &rng, bool intel) {
         uint8_t modrm = xorModRM[regIdx];
         uint8_t nopOp = 0x19 + rng.nextInRange(0, 4); // 0F 19..0F 1D
         std::string Lexit = ".Ls" + std::to_string(labelCounter++) + "x";
-        asm_ss << "jmp " << L1 << "\n";
+        asm_ss << "jmp " << Lexit << "\n";
         asm_ss << ".byte 0x66, 0x66, 0x66, 0x66, 0x66, 0x66, 0x66\n";
         asm_ss << ".byte 0x0F, 0x" << std::hex << (int)nopOp << ", 0x84, 0x00\n";
         asm_ss << L1 << ":\n";
@@ -539,11 +539,10 @@ generateDynamicPattern(ObfRNG &rng, bool intel) {
         uint8_t subModRM[] = {0xC0,0xC9,0xD2,0xDB,0xF6,0xFF};
         uint8_t modrm = subModRM[regIdx];
         uint8_t nopOp = 0x19 + rng.nextInRange(0, 6);
-        // Random trap: HLT, INT3, or EB FE (infinite loop)
         int trapChoice = rng.nextInRange(0, 2);
         int numPfx = 5 + rng.nextInRange(0, 2);
         std::string Lexit = ".Ls" + std::to_string(labelCounter++) + "x";
-        asm_ss << "jmp " << L1 << "\n";
+        asm_ss << "jmp " << Lexit << "\n";
         asm_ss << ".byte ";
         for (int i = 0; i < numPfx; i++) {
             asm_ss << "0x66";
@@ -554,13 +553,93 @@ generateDynamicPattern(ObfRNG &rng, bool intel) {
         asm_ss << L1 << ":\n";
         asm_ss << ".byte 0x29, 0x" << std::hex << (int)modrm << "\n";
         if (trapChoice == 2) {
-            // Infinite loop trap: JZ +2 skips EB FE (2 bytes)
             asm_ss << ".byte 0x74, 0x02\n";
-            asm_ss << ".byte 0xEB, 0xFE\n"; // JMP -2 = infinite loop
+            asm_ss << ".byte 0xEB, 0xFE\n"; // infinite loop
         } else {
             asm_ss << ".byte 0x74, 0x01\n";
             asm_ss << ".byte 0x" << std::hex << (trapChoice == 0 ? 0xF4 : 0xCC) << "\n";
         }
+        asm_ss << Lexit << ":\n";
+        break;
+    }
+
+    // ================================================================
+    // DELAYED TRAPS (strategies 31-34)
+    // If a deobfuscator doesn't follow the correct NOP-bridged path,
+    // the dead path runs several real-looking instructions before
+    // hitting an infinite loop or crash many bytes later.
+    // ================================================================
+
+    case 31: {
+        // JMP over 15-byte NOP to exit, dead path has fake computation + infinite loop
+        std::string Lexit = ".Ls" + std::to_string(labelCounter++) + "x";
+        uint8_t nopOp = 0x19 + rng.nextInRange(0, 6);
+        // Real path: JMP into NOP displacement → JMP to exit (no register clobber)
+        asm_ss << "jmp " << Lexit << "\n";
+        asm_ss << ".byte 0x66, 0x66, 0x66, 0x66, 0x66, 0x66, 0x66\n";
+        asm_ss << ".byte 0x0F, 0x" << std::hex << (int)nopOp << ", 0x84, 0x00\n";
+        asm_ss << L1 << ":\n";
+        asm_ss << "jmp " << Lexit << "\n";
+        // Dead path: fake computation → infinite loop (never reached)
+        if (intel) asm_ss << "add " << reg << ", " << std::dec << rng.nextInRange(1,127) << "\n";
+        else       asm_ss << "addl $$" << std::dec << rng.nextInRange(1,127) << ", " << reg << "\n";
+        if (intel) asm_ss << "sub " << reg << ", " << std::dec << rng.nextInRange(1,127) << "\n";
+        else       asm_ss << "subl $$" << std::dec << rng.nextInRange(1,127) << ", " << reg << "\n";
+        asm_ss << ".byte 0xEB, 0xFE\n"; // infinite loop
+        asm_ss << Lexit << ":\n";
+        break;
+    }
+    case 32: {
+        std::string Lexit = ".Ls" + std::to_string(labelCounter++) + "x";
+        uint8_t nopOp = 0x19 + rng.nextInRange(0, 6);
+        asm_ss << "jmp " << Lexit << "\n";
+        asm_ss << ".byte 0x66, 0x66, 0x66, 0x66, 0x66, 0x66, 0x66\n";
+        asm_ss << ".byte 0x0F, 0x" << std::hex << (int)nopOp << ", 0x84, 0x00\n";
+        asm_ss << L1 << ":\n";
+        asm_ss << "jmp " << Lexit << "\n";
+        // Dead: computation then HLT
+        if (intel) asm_ss << "xor " << reg << ", " << std::dec << rng.nextInRange(1,255) << "\n";
+        else       asm_ss << "xorl $$" << std::dec << rng.nextInRange(1,255) << ", " << reg << "\n";
+        asm_ss << ".byte 0xF4\n";
+        asm_ss << Lexit << ":\n";
+        break;
+    }
+    case 33: {
+        std::string Lexit = ".Ls" + std::to_string(labelCounter++) + "x";
+        std::string Ltrap = ".Ls" + std::to_string(labelCounter++) + "t";
+        uint8_t nopOp = 0x19 + rng.nextInRange(0, 6);
+        asm_ss << "jmp " << Lexit << "\n";
+        asm_ss << ".byte 0x66, 0x66, 0x66, 0x66, 0x66, 0x66, 0x66\n";
+        asm_ss << ".byte 0x0F, 0x" << std::hex << (int)nopOp << ", 0x84, 0x00\n";
+        asm_ss << L1 << ":\n";
+        asm_ss << "jmp " << Lexit << "\n";
+        // Dead: infinite loop that looks like real computation
+        asm_ss << Ltrap << ":\n";
+        if (intel) asm_ss << "add " << reg << ", 1\n";
+        else       asm_ss << "addl $$1, " << reg << "\n";
+        asm_ss << "jmp " << Ltrap << "\n";
+        asm_ss << Lexit << ":\n";
+        break;
+    }
+    case 34: {
+        std::string Lexit = ".Ls" + std::to_string(labelCounter++) + "x";
+        uint8_t nopOp = 0x19 + rng.nextInRange(0, 6);
+        asm_ss << "jmp " << Lexit << "\n";
+        asm_ss << ".byte 0x66, 0x66, 0x66, 0x66, 0x66, 0x66, 0x66\n";
+        asm_ss << ".byte 0x0F, 0x" << std::hex << (int)nopOp << ", 0x84, 0x00\n";
+        asm_ss << L1 << ":\n";
+        asm_ss << "jmp " << Lexit << "\n";
+        // Dead zone: plausible code with hidden traps
+        if (intel) {
+            asm_ss << "add " << reg << ", " << std::dec << rng.nextInRange(1,100) << "\n";
+            asm_ss << ".byte 0xCC\n";
+            asm_ss << "sub " << reg << ", " << std::dec << rng.nextInRange(1,100) << "\n";
+        } else {
+            asm_ss << "addl $$" << std::dec << rng.nextInRange(1,100) << ", " << reg << "\n";
+            asm_ss << ".byte 0xCC\n";
+            asm_ss << "subl $$" << std::dec << rng.nextInRange(1,100) << ", " << reg << "\n";
+        }
+        asm_ss << ".byte 0xEB, 0xFE\n";
         asm_ss << Lexit << ":\n";
         break;
     }
