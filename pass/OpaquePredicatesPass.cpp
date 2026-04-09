@@ -130,6 +130,8 @@ static const char* opqRegs_intel[] = { "eax","ebx","ecx","edx","esi","edi" };
 static const char* opqRegs_att[]   = { "%eax","%ebx","%ecx","%edx","%esi","%edi" };
 static const char* opqClobbers[]   = { "eax","ebx","ecx","edx","esi","edi" };
 
+static const char* gPrefixes[] = {".g",".v",".d",".t",".m",".p",".r",".k"};
+
 static bool isIntelTarget(Function &F) {
     Triple TT(F.getParent()->getTargetTriple());
     return TT.isWindowsMSVCEnvironment() || TT.isWindowsItaniumEnvironment();
@@ -243,7 +245,7 @@ static Value* getOpaqueVar(Function &F, IRBuilder<> &Builder, ObfRNG &rng) {
     auto *GV = new GlobalVariable(*F.getParent(), I32, false,
         GlobalValue::PrivateLinkage,
         ConstantInt::get(I32, rng.next32()),
-        ".opq." + std::to_string(rng.next32()));
+        std::string(gPrefixes[rng.nextInRange(0, 7)]) + std::to_string(rng.next32()));
     auto *Load = Builder.CreateLoad(I32, GV);
     cast<LoadInst>(Load)->setVolatile(true);
     return Load;
@@ -281,10 +283,10 @@ static void fillBogusBlock(BasicBlock *BB, Function &F, ObfRNG &rng) {
     // Anti-disasm before the store
     emitAntiDisasm(B, rng);
 
-    // Store to a volatile global to prevent DCE
+    // Store to a volatile global to prevent DCE (random name to avoid patterns)
     auto *JunkGV = new GlobalVariable(*F.getParent(), I32, false,
         GlobalValue::PrivateLinkage, ConstantInt::get(I32, 0),
-        ".junk." + std::to_string(rng.next32()));
+        std::string(gPrefixes[rng.nextInRange(0, 7)]) + std::to_string(rng.next32()));
     auto *Store = B.CreateStore(V, JunkGV);
     Store->setVolatile(true);
 

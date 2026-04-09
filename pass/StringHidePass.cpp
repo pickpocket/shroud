@@ -112,16 +112,16 @@ PreservedAnalyses StringHidePass::run(Module &M, ModuleAnalysisManager &AM) {
     auto *AuxGV1 = new GlobalVariable(M, I32, false,
         GlobalValue::PrivateLinkage,
         ConstantInt::get(I32, rng.next32()),
-        ".str_aux1");
+        ".a" + std::to_string(rng.next32()));
     auto *AuxGV2 = new GlobalVariable(M, I32, false,
         GlobalValue::PrivateLinkage,
         ConstantInt::get(I32, rng.next32()),
-        ".str_aux2");
+        ".b" + std::to_string(rng.next32()));
 
-    // Create constructor function
+    // Create constructor function (random name)
     FunctionType *CtorFTy = FunctionType::get(Type::getVoidTy(M.getContext()), false);
     Function *Ctor = Function::Create(CtorFTy, Function::InternalLinkage,
-        ".shroud_str_init", &M);
+        ".init" + std::to_string(rng.next32()), &M);
     // Mark optnone so MBA/opaque/overlap passes skip this function
     Ctor->addFnAttr(Attribute::OptimizeNone);
     Ctor->addFnAttr(Attribute::NoInline);

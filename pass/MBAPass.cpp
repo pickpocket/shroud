@@ -11,165 +11,123 @@ using namespace llvm;
 namespace shroud {
 
 // ============================================================================
-// Build LLVM IR for dynamic MBA WITHOUT using NOT/complement operations.
-//
-// Key insight: the 16 bitwise basis functions of 2 variables can ALL be
-// expressed using only AND, OR, XOR, ADD, SUB of x and y (no ~x, no ~y,
-// no 0xFFFFFFFF constants).
-//
-// The 4 "positive minterms" are:
-//   m3 = x & y     (bit 3 of truth table)
-//   m2 = x & ~y    BUT we compute: m2 = x - (x & y) = x - m3
-//   m1 = ~x & y    BUT we compute: m1 = y - (x & y) = y - m3
-//   m0 = ~x & ~y   BUT we compute: m0 = (x ^ y ^ m3) - m1 - m2
-//      or better:   m0 = (m2 ^ m1) - m2 - m1 + ... no
-//      Actually:    The 4 minterms sum to -1 (all bits set):
-//                   m0 + m1 + m2 + m3 = ~0
-//      But we want to avoid -1 / 0xFFFFFFFF!
-//
-// BETTER APPROACH: Don't build from minterms at all.
-// Instead, express each basis function directly:
-//   e0  = 0
-//   e1  = truth table 0001 -> only (0,0) -> needs ~x&~y -> AVOID
-//   ...
-// Most basis functions involving complements are problematic.
-//
-// SOLUTION: Restructure the coefficients to only use the 4 basis functions
-// that DON'T need complements, plus arithmetic combinations:
-//   e8  = x & y           (truth table 1000 in my encoding -> bit3)
-//   e4  = x & ~y = x - (x&y) = x XOR (x&y)  [since x&~y = x XOR(x AND y)... no]
-//         Actually: x & ~y = x - (x & y) works because the bits are disjoint!
-//         Wait: x - (x&y) = x&~y only when computed bitwise? No, in integer:
-//         x = (x & y) + (x & ~y), so x - (x & y) = x & ~y. YES this works
-//         for unsigned integers because the bits are disjoint (no borrow).
-//   e2  = ~x & y = y - (x & y) [same argument]
-//   e1  = ~x & ~y = NOT(x | y) = ... still uses NOT
-//         BUT: ~x & ~y = -1 - x - y + (x & y) [DeMorgan + arithmetic]
-//         Still has -1! Hmm.
-//
-// FINAL APPROACH: Express sum(c_j * e_j) purely using x, y, x&y, x|y, x^y
-// and random coefficients, without ever materializing ~x or ~y.
-//
-// The truth-table system gives us coefficients for the 16 basis functions.
-// We can algebraically rewrite the sum using the identities:
-//   e_j for j with bits only in {bit2, bit3} (i.e. j in {4,8,12}) -> use x, x&y
-//   e_j for j with bits only in {bit1, bit3} (i.e. j in {2,8,10}) -> use y, x&y
-// etc.
-//
-// But the simplest approach: compute the 4 core values WITHOUT NOT:
-//   V_and = x & y
-//   V_xor = x ^ y
-//   V_or  = x | y
-//   V_xany = x XOR (x AND y) = x & ~y  [no NOT: XOR removes shared bits]
-//   V_yanx = y XOR (x AND y) = ~x & y  [same trick]
-//   V_nand = ... still needs NOT for ~(x&y)
-//
-// KEY REALIZATION: We only need 4 independent functions to span the space.
-// Use: {x & y, x ^ y, 1, x + y} or better {x, y, x&y, 1}
-// But 1 = constant, not -1.
-//
-// PRAGMATIC APPROACH: Use the 4 minterms but compute them without NOT:
-//   m3 = x & y
-//   m2 = x - m3        (= x & ~y, no NOT needed)
-//   m1 = y - m3        (= ~x & y, no NOT needed)
-//   m0 = needs ~x & ~y
-//
-// For m0: we know m0 + m1 + m2 + m3 = -1 (all bits set)
-// So m0 = -1 - m1 - m2 - m3 = -(1 + m1 + m2 + m3)
-// BUT -1 is 0xFFFFFFFF! We want to avoid that constant.
-// Alternative: m0 = -(m1 + m2 + m3 + 1) = -(m1 + m2 + m3) - 1
-// = 0 - m1 - m2 - m3 - 1
-// The "1" constant is fine. The "0 - ..." is NEG which doesn't use 0xFFFFFFFF.
-//
-// In LLVM IR:
-//   m3 = CreateAnd(X, Y)
-//   m2 = CreateSub(X, m3)     // x - (x&y) = x & ~y
-//   m1 = CreateSub(Y, m3)     // y - (x&y) = ~x & y
-//   sum_123 = CreateAdd(CreateAdd(m1, m2), m3)
-//   m0 = CreateSub(CreateNeg(sum_123), ConstantInt(1))
-//   or: m0 = CreateNot(CreateOr(X, Y))  -- still uses NOT
-//   or: m0 = CreateXor(CreateOr(X, Y), -1)  -- still 0xFFFFFFFF
-//
-// BEST: just compute m0 arithmetically:
-//   m0 = 0 - m1 - m2 - m3 - 1
-// The constants here are 0 and 1 — no 0xFFFFFFFF!
-// CreateSub(CreateSub(CreateSub(CreateSub(0, m1), m2), m3), 1)
+// Fully dynamic MBA IR builder — every instance has unique structure.
+// Randomizes: minterm algebra, term order, noise injection, operand order.
 // ============================================================================
 
 static Value* buildDynamicMBAIR(IRBuilder<> &Builder, const DynamicMBAResult &mba,
-                                 Value *X, Value *Y, Type *Ty) {
-    // Compute the 4 minterms WITHOUT using NOT (~) or 0xFFFFFFFF:
-    Value *m3 = Builder.CreateAnd(X, Y);                    // x & y
-    Value *m2 = Builder.CreateSub(X, m3);                   // x - (x&y) = x & ~y
-    Value *m1 = Builder.CreateSub(Y, m3);                   // y - (x&y) = ~x & y
-    // m0 = ~x & ~y = -(m1 + m2 + m3) - 1 = 0 - m1 - m2 - m3 - 1
+                                 Value *X, Value *Y, Type *Ty, ObfRNG &rng) {
     Value *Zero = ConstantInt::get(Ty, 0);
     Value *One = ConstantInt::get(Ty, 1);
-    Value *m0 = Builder.CreateSub(
-        Builder.CreateSub(
-            Builder.CreateSub(
-                Builder.CreateSub(Zero, m1),
-                m2),
-            m3),
-        One);
+
+    // m3 = x & y — random algebraic form
+    Value *m3;
+    switch (rng.nextInRange(0, 2)) {
+    default:
+    case 0: m3 = Builder.CreateAnd(X, Y); break;
+    case 1: m3 = Builder.CreateSub(Builder.CreateAdd(X, Y), Builder.CreateOr(X, Y)); break;
+    case 2: { // (x+y) - ((x^y)&x) - ((x^y)&y) - ... just use the first two
+        Value *XY = Builder.CreateXor(X, Y);
+        m3 = Builder.CreateSub(X, Builder.CreateAnd(XY, X));
+        break;
+    }
+    }
+
+    // m2 = x & ~y — random form
+    Value *m2;
+    switch (rng.nextInRange(0, 2)) {
+    default:
+    case 0: m2 = Builder.CreateSub(X, m3); break;
+    case 1: m2 = Builder.CreateAnd(Builder.CreateXor(X, Y), X); break;
+    case 2: m2 = Builder.CreateXor(X, Builder.CreateAnd(X, Y)); break;
+    }
+
+    // m1 = ~x & y — random form
+    Value *m1;
+    switch (rng.nextInRange(0, 2)) {
+    default:
+    case 0: m1 = Builder.CreateSub(Y, m3); break;
+    case 1: m1 = Builder.CreateAnd(Builder.CreateXor(X, Y), Y); break;
+    case 2: m1 = Builder.CreateXor(Y, Builder.CreateAnd(X, Y)); break;
+    }
+
+    // m0 = ~x & ~y — random computation order
+    Value *m0;
+    switch (rng.nextInRange(0, 2)) {
+    default:
+    case 0: m0 = Builder.CreateSub(Builder.CreateSub(Builder.CreateSub(
+                Builder.CreateSub(Zero, m1), m2), m3), One); break;
+    case 1: m0 = Builder.CreateSub(Zero,
+                Builder.CreateAdd(Builder.CreateAdd(
+                    Builder.CreateAdd(m1, m2), m3), One)); break;
+    case 2: m0 = Builder.CreateSub(Builder.CreateSub(Builder.CreateSub(
+                Builder.CreateSub(Zero, m3), m2), One), m1); break;
+    }
 
     Value *Minterms[4] = { m0, m1, m2, m3 };
 
-    // Now build: sum(coefficients[j] * basis_j(x, y))
-    // basis_j = OR of minterms where bit is set in j
-    // But we avoid OR by using ADD since minterms are disjoint (no overlapping bits)!
-    // For disjoint bit patterns: A | B = A + B
-    // Minterms are always disjoint, so we can use ADD instead of OR.
+    // Collect and shuffle non-zero terms
+    struct Term { int64_t coeff; int basisIdx; };
+    SmallVector<Term, 16> terms;
+    for (int j = 0; j < 16; j++)
+        if (mba.coefficients[j] != 0)
+            terms.push_back({mba.coefficients[j], j});
 
+    for (int i = (int)terms.size() - 1; i > 0; i--) {
+        int j = rng.nextInRange(0, i);
+        std::swap(terms[i], terms[j]);
+    }
+
+    // Build sum with random noise between terms
     Value *Result = Zero;
     bool first = true;
-
-    for (int j = 0; j < 16; j++) {
-        if (mba.coefficients[j] == 0) continue;
-
-        // Build basis_j = sum of minterms where bit is set
-        // Since minterms are disjoint, ADD = OR (no NOT needed!)
+    for (auto &t : terms) {
+        // Build basis from minterms in random order
         Value *BasisVal = Zero;
-        bool basisFirst = true;
-        for (int bit = 0; bit < 4; bit++) {
-            if ((j >> bit) & 1) {
-                if (basisFirst) {
-                    BasisVal = Minterms[bit];
-                    basisFirst = false;
-                } else {
-                    BasisVal = Builder.CreateAdd(BasisVal, Minterms[bit]);
-                }
+        bool bFirst = true;
+        int bits[4] = {0, 1, 2, 3};
+        for (int i = 3; i > 0; i--) std::swap(bits[i], bits[rng.nextInRange(0, i)]);
+
+        for (int b = 0; b < 4; b++) {
+            int bit = bits[b];
+            if ((t.basisIdx >> bit) & 1) {
+                if (bFirst) { BasisVal = Minterms[bit]; bFirst = false; }
+                else BasisVal = Builder.CreateAdd(BasisVal, Minterms[bit]);
             }
         }
 
-        // Multiply by coefficient (random, unique per-operation)
-        Value *Coeff = ConstantInt::get(Ty, (uint64_t)mba.coefficients[j]);
-        Value *Term = Builder.CreateMul(Coeff, BasisVal);
+        Value *Coeff = ConstantInt::get(Ty, (uint64_t)t.coeff);
+        Value *TermVal = Builder.CreateMul(Coeff, BasisVal);
 
-        if (first) {
-            Result = Term;
-            first = false;
-        } else {
-            Result = Builder.CreateAdd(Result, Term);
+        // Random noise: (expr - expr) = 0 (low prob to control size)
+        if (rng.nextBool(0.1)) {
+            Value *NC = ConstantInt::get(Ty, rng.next32());
+            Value *Noise;
+            switch (rng.nextInRange(0, 3)) {
+            default:
+            case 0: Noise = Builder.CreateXor(X, NC); break;
+            case 1: Noise = Builder.CreateAnd(X, NC); break;
+            case 2: Noise = Builder.CreateOr(Y, NC); break;
+            case 3: Noise = Builder.CreateAdd(X, NC); break;
+            }
+            TermVal = Builder.CreateAdd(TermVal, Builder.CreateSub(Noise, Noise));
         }
+
+        if (first) { Result = TermVal; first = false; }
+        else if (rng.nextBool()) Result = Builder.CreateAdd(Result, TermVal);
+        else                     Result = Builder.CreateAdd(TermVal, Result);
     }
 
     return Result;
 }
 
-// Obfuscate integer constants using MBA (no NOT/0xFFFFFFFF)
 static Value* obfuscateConstantIR(IRBuilder<> &Builder, uint64_t C, Value *AuxVar,
                                    Type *Ty, ObfRNG &rng) {
     uint32_t c32 = (uint32_t)C;
-    if (c32 == 0 || c32 == 1 || c32 == 0xFFFFFFFF)
-        return nullptr;
-
+    if (c32 == 0 || c32 == 1 || c32 == 0xFFFFFFFF) return nullptr;
     auto mba = obfuscateConstant(c32, rng, 32);
-
-    uint32_t salt = rng.next32();
-    Value *Y = Builder.CreateXor(AuxVar, ConstantInt::get(Ty, salt));
-
-    return buildDynamicMBAIR(Builder, mba, AuxVar, Y, Ty);
+    Value *Y = Builder.CreateXor(AuxVar, ConstantInt::get(Ty, rng.next32()));
+    return buildDynamicMBAIR(Builder, mba, AuxVar, Y, Ty, rng);
 }
 
 PreservedAnalyses MBAPass::run(Function &F, FunctionAnalysisManager &AM) {
@@ -178,23 +136,17 @@ PreservedAnalyses MBAPass::run(Function &F, FunctionAnalysisManager &AM) {
 
     uint64_t seed = std::hash<std::string>{}(F.getName().str()) ^ 0xBBA0;
     ObfRNG rng(seed);
-
     bool Changed = false;
-
     Value *AuxVar = nullptr;
 
-    // 3 rounds of dynamic MBA substitution
     for (int round = 0; round < 3; round++) {
         for (auto &BB : F) {
             for (auto I = BB.begin(), E = BB.end(); I != E; ) {
                 Instruction &Inst = *I++;
                 auto *BinOp = dyn_cast<BinaryOperator>(&Inst);
-                if (!BinOp || !BinOp->getType()->isIntegerTy(32))
-                    continue;
-
-                double prob = (round == 0) ? 1.0 : (round == 1) ? 0.7 : 0.5;
-                if (round > 0 && !rng.nextBool(prob))
-                    continue;
+                if (!BinOp || !BinOp->getType()->isIntegerTy(32)) continue;
+                double prob = (round == 0) ? 1.0 : (round == 1) ? 0.5 : 0.2;
+                if (round > 0 && !rng.nextBool(prob)) continue;
 
                 ArithOp targetOp;
                 switch (BinOp->getOpcode()) {
@@ -207,33 +159,9 @@ PreservedAnalyses MBAPass::run(Function &F, FunctionAnalysisManager &AM) {
                 }
 
                 IRBuilder<> Builder(BinOp);
-                Value *A = BinOp->getOperand(0);
-                Value *B = BinOp->getOperand(1);
-
-                // Generate unique dynamic MBA per operation site
                 auto dynamicMBA = generateDynamicMBA(targetOp, rng);
-                Value *NewVal = buildDynamicMBAIR(Builder, dynamicMBA, A, B,
-                                                   BinOp->getType());
-
-                // Add zero-identity noise: result + MBA_zero(A, B)
-                // where MBA_zero evaluates to 0 for all inputs
-                // This adds algebraic noise without changing the result
-                if (rng.nextBool(0.5)) {
-                    // Generate an MBA expression that's always zero
-                    // by using the same target but subtracting it from itself
-                    // Shortcut: (A & B) + (A - (A & B)) - A = 0
-                    // Build it via MBA to make it look complex
-                    Type *Ty = BinOp->getType();
-                    Value *AB = Builder.CreateAnd(A, B);
-                    Value *AsubAB = Builder.CreateSub(A, AB);
-                    Value *ZeroExpr = Builder.CreateSub(
-                        Builder.CreateAdd(AB, AsubAB), A);
-                    // Scale by a random constant (0 * anything = 0)
-                    Value *Scaled = Builder.CreateMul(ZeroExpr,
-                        ConstantInt::get(Ty, rng.next32()));
-                    NewVal = Builder.CreateAdd(NewVal, Scaled);
-                }
-
+                Value *NewVal = buildDynamicMBAIR(Builder, dynamicMBA,
+                    BinOp->getOperand(0), BinOp->getOperand(1), BinOp->getType(), rng);
                 BinOp->replaceAllUsesWith(NewVal);
                 BinOp->eraseFromParent();
                 Changed = true;
@@ -241,7 +169,7 @@ PreservedAnalyses MBAPass::run(Function &F, FunctionAnalysisManager &AM) {
         }
     }
 
-    // Constant obfuscation pass
+    // Constant obfuscation
     if (!AuxVar) {
         for (auto &Arg : F.args()) {
             if (Arg.getType()->isIntegerTy(32)) { AuxVar = &Arg; break; }
@@ -253,14 +181,12 @@ PreservedAnalyses MBAPass::run(Function &F, FunctionAnalysisManager &AM) {
         }
         if (!AuxVar) {
             auto *GV = new GlobalVariable(*F.getParent(),
-                Type::getInt32Ty(F.getContext()), false,
-                GlobalValue::PrivateLinkage,
+                Type::getInt32Ty(F.getContext()), false, GlobalValue::PrivateLinkage,
                 ConstantInt::get(Type::getInt32Ty(F.getContext()), rng.next32()),
-                ".mba_aux." + std::to_string(rng.next32()));
+                ".x" + std::to_string(rng.next32()));
             IRBuilder<> B(&F.getEntryBlock().front());
             auto *Load = B.CreateLoad(Type::getInt32Ty(F.getContext()), GV);
-            Load->setVolatile(true);
-            AuxVar = Load;
+            Load->setVolatile(true); AuxVar = Load;
         }
     }
 
@@ -274,12 +200,8 @@ PreservedAnalyses MBAPass::run(Function &F, FunctionAnalysisManager &AM) {
                 if (val < 2 || val == 0xFFFFFFFF) continue;
                 if (!rng.nextBool(0.2)) continue;
                 IRBuilder<> Builder(&Inst);
-                Value *ObfConst = obfuscateConstantIR(Builder, val, AuxVar,
-                    CI->getType(), rng);
-                if (ObfConst) {
-                    Inst.setOperand(op, ObfConst);
-                    Changed = true;
-                }
+                Value *ObfConst = obfuscateConstantIR(Builder, val, AuxVar, CI->getType(), rng);
+                if (ObfConst) { Inst.setOperand(op, ObfConst); Changed = true; }
             }
         }
     }
