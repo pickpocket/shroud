@@ -509,12 +509,10 @@ DynamicMBAResult generateDynamicMBA(ArithOp target, ObfRNG& rng,
     DynamicMBAResult result;
     result.coefficients = baseSol.coefficients;
 
-    // Perturbation: 6-12 rounds with random scales
-    // Targets ~2M lines of IR output for the crackme
-    int numPerturbations = rng.nextInRange(6, 12);
+    int numPerturbations = rng.nextInRange(6, 10);
     for (int i = 0; i < numPerturbations; i++) {
         int vecIdx = rng.nextInRange(0, (uint32_t)nullVecs.size() - 1);
-        int64_t scale = (int64_t)rng.nextInRange(1, 150);
+        int64_t scale = (int64_t)rng.nextInRange(1, 100);
         if (rng.nextBool()) scale = -scale;
 
         for (int j = 0; j < 16; j++) {

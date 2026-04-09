@@ -145,7 +145,7 @@ PreservedAnalyses MBAPass::run(Function &F, FunctionAnalysisManager &AM) {
                 Instruction &Inst = *I++;
                 auto *BinOp = dyn_cast<BinaryOperator>(&Inst);
                 if (!BinOp || !BinOp->getType()->isIntegerTy(32)) continue;
-                double prob = (round == 0) ? 1.0 : (round == 1) ? 0.5 : 0.2;
+                double prob = (round == 0) ? 1.0 : (round == 1) ? 0.4 : 0.15;
                 if (round > 0 && !rng.nextBool(prob)) continue;
 
                 ArithOp targetOp;

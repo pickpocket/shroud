@@ -299,6 +299,18 @@ static void fillBogusBlock(BasicBlock *BB, Function &F, ObfRNG &rng) {
 // Each bogus block has junk code and an opaque predicate branching to the next
 // The chain eventually converges back to the real continuation
 // ============================================================================
+// Fix PHI nodes in Target that don't have entries for new predecessors
+static void fixPHIsForNewPred(BasicBlock *Target, BasicBlock *NewPred, BasicBlock *ExistingPred) {
+    for (auto &I : *Target) {
+        auto *PN = dyn_cast<PHINode>(&I);
+        if (!PN) break;
+        // Add an incoming value from NewPred using the same value as ExistingPred
+        Value *Val = PN->getIncomingValueForBlock(ExistingPred);
+        if (Val) PN->addIncoming(Val, NewPred);
+        else PN->addIncoming(UndefValue::get(PN->getType()), NewPred);
+    }
+}
+
 static void createBogusChain(BasicBlock *FromBB, BasicBlock *RealTarget,
                               Function &F, ObfRNG &rng, int chainLength) {
     SmallVector<BasicBlock*, 8> bogusBlocks;
@@ -369,11 +381,14 @@ static void createBogusChain(BasicBlock *FromBB, BasicBlock *RealTarget,
     emitAntiDisasm(B, rng);
 
     if (negated) {
-        // Always-false: false→real, true→bogus
         B.CreateCondBr(Cond, bogusBlocks[0], RealTarget);
     } else {
-        // Always-true: true→real, false→bogus
         B.CreateCondBr(Cond, RealTarget, bogusBlocks[0]);
+    }
+
+    // Fix PHI nodes in RealTarget: bogus blocks are new predecessors
+    for (auto *BogBB : bogusBlocks) {
+        fixPHIsForNewPred(RealTarget, BogBB, FromBB);
     }
 }
 
@@ -405,28 +420,33 @@ PreservedAnalyses OpaquePredicatesPass::run(Function &F, FunctionAnalysisManager
 
         BasicBlock *CurrentBB = BB;
         for (int gate = 0; gate < numGates; gate++) {
-            if (CurrentBB->size() < 2) break;
+            if (CurrentBB->size() < 3) break;
 
-            // Find a split point (skip PHIs and terminators)
+            // Skip if block starts with PHI nodes (can't safely split)
+            if (isa<PHINode>(CurrentBB->front())) break;
+
+            // Find first non-PHI non-terminator to split at
             Instruction *splitPt = nullptr;
-            int instIdx = 0;
             for (auto &I : *CurrentBB) {
                 if (isa<PHINode>(I) || I.isTerminator()) continue;
-                instIdx++;
-                // For chained gates, split at different positions in the block
-                if (instIdx >= (gate + 1)) { splitPt = &I; break; }
+                splitPt = &I;
+                break;
             }
             if (!splitPt) break;
 
             BasicBlock *TailBB = CurrentBB->splitBasicBlock(splitPt,
                 "real." + std::to_string(rng.next32()));
 
-            // Each gate gets its own bogus chain with random depth
+            // Skip if tail has PHI nodes (splitBasicBlock can create them)
+            if (isa<PHINode>(TailBB->front())) {
+                CurrentBB = TailBB;
+                continue;
+            }
+
             int chainLen = rng.nextInRange(2, 5);
             createBogusChain(CurrentBB, TailBB, F, rng, chainLen);
             Changed = true;
 
-            // The next gate operates on the tail block
             CurrentBB = TailBB;
         }
     }
