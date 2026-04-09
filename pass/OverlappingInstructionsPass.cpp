@@ -91,9 +91,11 @@ generateDynamicPattern(ObfRNG &rng, bool intel) {
 
     int strategy;
     int roll = rng.nextInRange(0, 99);
-    if (roll < 40)
+    if (roll < 30)
+        strategy = 23 + rng.nextInRange(0, 7);  // 15-byte NOP opaque (23-30)
+    else if (roll < 55)
         strategy = 15 + rng.nextInRange(0, 7);  // NOP control flow (15-22)
-    else if (roll < 70)
+    else if (roll < 75)
         strategy = 10 + rng.nextInRange(0, 4);  // NOP overlap (10-14)
     else
         strategy = rng.nextInRange(0, 9);        // standard (0-9)
@@ -413,6 +415,152 @@ generateDynamicPattern(ObfRNG &rng, bool intel) {
         asm_ss << "0x90\n";
         asm_ss << "jmp " << Lexit << "\n";
         asm_ss << ".byte 0x" << std::hex << rng.nextInRange(0,255) << "\n";
+        asm_ss << Lexit << ":\n";
+        break;
+    }
+
+    // ================================================================
+    // 15-BYTE NOP OPAQUE PREDICATES (strategies 23-30)
+    //
+    // Format: 7x 66 prefix + 0F 1F 84 00 + 4-byte displacement
+    // Execution JMPs to byte 11 (displacement field) which contains
+    // an opaque predicate + conditional skip over a trap byte.
+    //
+    // Hidden code at byte 11 (4 bytes):
+    //   [2-byte opaque] [JZ/JC/JNC +1] → skip trap → real code
+    // Byte 15 (after NOP): trap instruction (F4=HLT or CC=INT3)
+    // ================================================================
+
+    case 23: {
+        // XOR reg,reg (ZF=1) + JZ +1 over HLT trap
+        // 33 XX = XOR reg,reg; 74 01 = JZ +1; F4 = HLT
+        uint8_t xorModRM[] = {0xC0,0xC9,0xD2,0xDB,0xF6,0xFF}; // EAX..EDI
+        uint8_t modrm = xorModRM[regIdx];
+        std::string Lexit = ".Ls" + std::to_string(labelCounter++) + "x";
+        asm_ss << "jmp " << L1 << "\n";
+        asm_ss << ".byte 0x66, 0x66, 0x66, 0x66, 0x66, 0x66, 0x66\n"; // 7 prefixes
+        asm_ss << ".byte 0x0F, 0x1F, 0x84, 0x00\n";                    // NOP opcode+ModRM+SIB
+        asm_ss << L1 << ":\n";                                          // byte 11: displacement
+        asm_ss << ".byte 0x33, 0x" << std::hex << (int)modrm << "\n";   // XOR reg,reg
+        asm_ss << ".byte 0x74, 0x01\n";                                  // JZ +1
+        asm_ss << ".byte 0xF4\n";                                        // HLT trap
+        asm_ss << Lexit << ":\n";
+        break;
+    }
+    case 24: {
+        // SUB reg,reg (ZF=1) + JZ +1 over INT3 trap
+        uint8_t subModRM[] = {0xC0,0xC9,0xD2,0xDB,0xF6,0xFF};
+        uint8_t modrm = subModRM[regIdx];
+        std::string Lexit = ".Ls" + std::to_string(labelCounter++) + "x";
+        asm_ss << "jmp " << L1 << "\n";
+        asm_ss << ".byte 0x66, 0x66, 0x66, 0x66, 0x66, 0x66, 0x66\n";
+        asm_ss << ".byte 0x0F, 0x1F, 0x84, 0x00\n";
+        asm_ss << L1 << ":\n";
+        asm_ss << ".byte 0x29, 0x" << std::hex << (int)modrm << "\n";   // SUB reg,reg
+        asm_ss << ".byte 0x74, 0x01\n";                                  // JZ +1
+        asm_ss << ".byte 0xCC\n";                                        // INT3 trap
+        asm_ss << Lexit << ":\n";
+        break;
+    }
+    case 25: {
+        // XOR reg,reg (SF=0) + JNS +1 over HLT
+        uint8_t xorModRM[] = {0xC0,0xC9,0xD2,0xDB,0xF6,0xFF};
+        uint8_t modrm = xorModRM[regIdx];
+        std::string Lexit = ".Ls" + std::to_string(labelCounter++) + "x";
+        asm_ss << "jmp " << L1 << "\n";
+        asm_ss << ".byte 0x66, 0x66, 0x66, 0x66, 0x66, 0x66, 0x66\n";
+        asm_ss << ".byte 0x0F, 0x1F, 0x84, 0x00\n";
+        asm_ss << L1 << ":\n";
+        asm_ss << ".byte 0x33, 0x" << std::hex << (int)modrm << "\n";   // XOR reg,reg
+        asm_ss << ".byte 0x79, 0x01\n";                                  // JNS +1
+        asm_ss << ".byte 0xF4\n";                                        // HLT trap
+        asm_ss << Lexit << ":\n";
+        break;
+    }
+    case 26: {
+        // XOR reg,reg (PF=1) + JP +1 over INT3
+        uint8_t xorModRM[] = {0xC0,0xC9,0xD2,0xDB,0xF6,0xFF};
+        uint8_t modrm = xorModRM[regIdx];
+        std::string Lexit = ".Ls" + std::to_string(labelCounter++) + "x";
+        asm_ss << "jmp " << L1 << "\n";
+        asm_ss << ".byte 0x66, 0x66, 0x66, 0x66, 0x66, 0x66, 0x66\n";
+        asm_ss << ".byte 0x0F, 0x1F, 0x84, 0x00\n";
+        asm_ss << L1 << ":\n";
+        asm_ss << ".byte 0x33, 0x" << std::hex << (int)modrm << "\n";   // XOR reg,reg
+        asm_ss << ".byte 0x7A, 0x01\n";                                  // JP +1 (parity even)
+        asm_ss << ".byte 0xCC\n";                                        // INT3 trap
+        asm_ss << Lexit << ":\n";
+        break;
+    }
+    case 27: {
+        // STC (CF=1) + JC +1 over HLT, inside 15-byte NOP
+        std::string Lexit = ".Ls" + std::to_string(labelCounter++) + "x";
+        asm_ss << "jmp " << L1 << "\n";
+        asm_ss << ".byte 0x66, 0x66, 0x66, 0x66, 0x66, 0x66, 0x66\n";
+        asm_ss << ".byte 0x0F, 0x1F, 0x84, 0x00\n";
+        asm_ss << L1 << ":\n";
+        asm_ss << ".byte 0xF9\n";                                        // STC
+        asm_ss << ".byte 0x72, 0x01\n";                                  // JC +1
+        asm_ss << ".byte 0xF4\n";                                        // HLT trap
+        asm_ss << Lexit << ":\n";
+        break;
+    }
+    case 28: {
+        // CLC (CF=0) + JNC +1 over INT3, inside 15-byte NOP
+        std::string Lexit = ".Ls" + std::to_string(labelCounter++) + "x";
+        asm_ss << "jmp " << L1 << "\n";
+        asm_ss << ".byte 0x66, 0x66, 0x66, 0x66, 0x66, 0x66, 0x66\n";
+        asm_ss << ".byte 0x0F, 0x1F, 0x84, 0x00\n";
+        asm_ss << L1 << ":\n";
+        asm_ss << ".byte 0xF8\n";                                        // CLC
+        asm_ss << ".byte 0x73, 0x01\n";                                  // JNC +1
+        asm_ss << ".byte 0xCC\n";                                        // INT3 trap
+        asm_ss << Lexit << ":\n";
+        break;
+    }
+    case 29: {
+        // XOR reg,reg + JZ +1 with undocumented NOP opcode (0F 1D instead of 0F 1F)
+        uint8_t xorModRM[] = {0xC0,0xC9,0xD2,0xDB,0xF6,0xFF};
+        uint8_t modrm = xorModRM[regIdx];
+        uint8_t nopOp = 0x19 + rng.nextInRange(0, 4); // 0F 19..0F 1D
+        std::string Lexit = ".Ls" + std::to_string(labelCounter++) + "x";
+        asm_ss << "jmp " << L1 << "\n";
+        asm_ss << ".byte 0x66, 0x66, 0x66, 0x66, 0x66, 0x66, 0x66\n";
+        asm_ss << ".byte 0x0F, 0x" << std::hex << (int)nopOp << ", 0x84, 0x00\n";
+        asm_ss << L1 << ":\n";
+        asm_ss << ".byte 0x33, 0x" << std::hex << (int)modrm << "\n";
+        asm_ss << ".byte 0x74, 0x01\n";
+        asm_ss << ".byte 0xF4\n";
+        asm_ss << Lexit << ":\n";
+        break;
+    }
+    case 30: {
+        // SUB + JZ, random trap, random undocumented NOP, random prefix count
+        uint8_t subModRM[] = {0xC0,0xC9,0xD2,0xDB,0xF6,0xFF};
+        uint8_t modrm = subModRM[regIdx];
+        uint8_t nopOp = 0x19 + rng.nextInRange(0, 6);
+        // Random trap: HLT, INT3, or EB FE (infinite loop)
+        int trapChoice = rng.nextInRange(0, 2);
+        int numPfx = 5 + rng.nextInRange(0, 2);
+        std::string Lexit = ".Ls" + std::to_string(labelCounter++) + "x";
+        asm_ss << "jmp " << L1 << "\n";
+        asm_ss << ".byte ";
+        for (int i = 0; i < numPfx; i++) {
+            asm_ss << "0x66";
+            if (i < numPfx - 1) asm_ss << ", ";
+        }
+        asm_ss << "\n";
+        asm_ss << ".byte 0x0F, 0x" << std::hex << (int)nopOp << ", 0x84, 0x00\n";
+        asm_ss << L1 << ":\n";
+        asm_ss << ".byte 0x29, 0x" << std::hex << (int)modrm << "\n";
+        if (trapChoice == 2) {
+            // Infinite loop trap: JZ +2 skips EB FE (2 bytes)
+            asm_ss << ".byte 0x74, 0x02\n";
+            asm_ss << ".byte 0xEB, 0xFE\n"; // JMP -2 = infinite loop
+        } else {
+            asm_ss << ".byte 0x74, 0x01\n";
+            asm_ss << ".byte 0x" << std::hex << (trapChoice == 0 ? 0xF4 : 0xCC) << "\n";
+        }
         asm_ss << Lexit << ":\n";
         break;
     }

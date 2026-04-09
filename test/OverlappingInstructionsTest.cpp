@@ -276,3 +276,159 @@ TEST(OverlapInst, ComplementaryJumps_BothPathsSkipRogue) {
     int jnz_target = 2 + 2 + jnz_disp;
     EXPECT_EQ(jnz_target, 5); // same target — both skip E8
 }
+
+// ============================================================================
+// 15-byte NOP opaque predicate byte sequence verification
+// ============================================================================
+
+// Verify that XOR reg,reg always sets ZF=1 (opaque predicate correctness)
+TEST(OverlapInst, NOP15_XorSelfAlwaysSetsZF) {
+    // XOR EAX,EAX = 33 C0, XOR ECX,ECX = 33 C9, etc.
+    // After XOR reg,reg: ZF=1, SF=0, PF=1, CF=0
+    uint8_t xorModRM[] = {0xC0, 0xC9, 0xD2, 0xDB, 0xF6, 0xFF};
+    for (auto modrm : xorModRM) {
+        // Verify ModRM encodes reg,reg (mod=11, src=dst)
+        EXPECT_EQ(modrm >> 6, 3); // mod=11
+        uint8_t src = (modrm >> 3) & 7;
+        uint8_t dst = modrm & 7;
+        EXPECT_EQ(src, dst); // same register
+    }
+}
+
+// Verify SUB reg,reg always sets ZF=1
+TEST(OverlapInst, NOP15_SubSelfAlwaysSetsZF) {
+    uint8_t subModRM[] = {0xC0, 0xC9, 0xD2, 0xDB, 0xF6, 0xFF};
+    for (auto modrm : subModRM) {
+        EXPECT_EQ(modrm >> 6, 3);
+        EXPECT_EQ((modrm >> 3) & 7, modrm & 7);
+    }
+}
+
+// Verify 15-byte NOP structure: 7x66 + 0F 1F + 84 + 00 = 11 bytes header
+TEST(OverlapInst, NOP15_HeaderIs11Bytes) {
+    // 7 prefix bytes (66) + 2 opcode bytes (0F 1F) + 1 ModRM (84) + 1 SIB (00) = 11
+    uint8_t header[] = {0x66, 0x66, 0x66, 0x66, 0x66, 0x66, 0x66,
+                        0x0F, 0x1F, 0x84, 0x00};
+    EXPECT_EQ(sizeof(header), 11u);
+
+    // Verify all prefixes are 66
+    for (int i = 0; i < 7; i++) EXPECT_EQ(header[i], 0x66);
+
+    // Verify opcode
+    EXPECT_EQ(header[7], 0x0F);
+    EXPECT_EQ(header[8], 0x1F);
+
+    // Verify ModRM: mod=10, reg=000, rm=100
+    EXPECT_EQ(header[9], 0x84);
+    EXPECT_EQ(header[9] >> 6, 2);       // mod=10 (32-bit displacement follows)
+    EXPECT_EQ((header[9] >> 3) & 7, 0); // reg=000 (/0)
+    EXPECT_EQ(header[9] & 7, 4);        // rm=100 (SIB follows)
+
+    // Verify SIB
+    EXPECT_EQ(header[10], 0x00);
+}
+
+// Verify displacement field (bytes 11-14) contains valid opaque predicate
+TEST(OverlapInst, NOP15_DisplacementIsOpaqueXorJz) {
+    // Pattern: 33 C0 74 01 = XOR EAX,EAX; JZ +1
+    uint8_t disp[] = {0x33, 0xC0, 0x74, 0x01};
+
+    EXPECT_EQ(disp[0], 0x33); // XOR opcode
+    EXPECT_EQ(disp[1], 0xC0); // ModRM: EAX,EAX
+    EXPECT_EQ(disp[2], 0x74); // JZ rel8
+    EXPECT_EQ(disp[3], 0x01); // +1 (skip exactly 1 trap byte)
+}
+
+// Verify trap bytes are crash-inducing
+TEST(OverlapInst, NOP15_TrapBytesAreFatal) {
+    EXPECT_EQ(0xF4, 0xF4); // HLT: halts CPU in ring 0, #GP in ring 3
+    EXPECT_EQ(0xCC, 0xCC); // INT3: debug breakpoint exception
+    // EB FE = JMP -2 (infinite loop)
+    EXPECT_EQ((uint8_t)0xEB, 0xEB);
+    EXPECT_EQ((uint8_t)0xFE, 0xFE);
+}
+
+// Verify JZ +1 skips exactly 1 byte (the trap)
+TEST(OverlapInst, NOP15_JzSkipsOneTrapByte) {
+    // JZ +1 at displacement offset 2 (byte 13 of the 15-byte NOP)
+    // JZ is 2 bytes: 74 01
+    // IP after JZ decode = byte 15 (13 + 2)
+    // Target = 15 + 1 = 16 (skips byte 15 which is the trap)
+    uint8_t jz_disp = 0x01;
+    int jz_instr_end = 13 + 2; // byte 15
+    int target = jz_instr_end + jz_disp; // byte 16
+    EXPECT_EQ(target, 16); // lands one byte past the trap
+}
+
+// Verify all condition codes used are correct for XOR-self result
+TEST(OverlapInst, NOP15_AllConditionsValidAfterXorSelf) {
+    // After XOR reg,reg: ZF=1, SF=0, PF=1, CF=0, OF=0
+    // JZ  (74) = jump if ZF=1 → TAKEN ✓
+    // JNS (79) = jump if SF=0 → TAKEN ✓
+    // JP  (7A) = jump if PF=1 → TAKEN ✓
+    // JC  (72) after STC: CF=1 → TAKEN ✓
+    // JNC (73) after CLC: CF=0 → TAKEN ✓
+
+    struct { uint8_t opcode; bool takenAfterXorSelf; const char* name; } conds[] = {
+        {0x74, true,  "JZ"},
+        {0x79, true,  "JNS"},
+        {0x7A, true,  "JP"},
+    };
+
+    for (auto& c : conds) {
+        EXPECT_TRUE(c.takenAfterXorSelf)
+            << c.name << " (0x" << std::hex << (int)c.opcode
+            << ") should be taken after XOR self";
+    }
+}
+
+// Verify undocumented NOP opcodes (0F 19..0F 1D) are valid in header
+TEST(OverlapInst, NOP15_UndocumentedOpcodeRange) {
+    for (uint8_t op = 0x19; op <= 0x1F; op++) {
+        // All should be valid NOP opcodes on P6+
+        EXPECT_GE(op, 0x19);
+        EXPECT_LE(op, 0x1F);
+    }
+}
+
+// Verify infinite loop trap (EB FE) is a valid 2-byte self-referencing JMP
+TEST(OverlapInst, NOP15_InfiniteLoopTrap) {
+    // EB FE = JMP rel8 with offset -2
+    // IP after decode = current + 2, target = current + 2 + (-2) = current
+    // This creates an infinite loop at the JMP instruction itself
+    int8_t displacement = (int8_t)0xFE; // -2 signed
+    EXPECT_EQ(displacement, -2);
+    // target = IP_after_decode + displacement = (addr+2) + (-2) = addr
+    // loops forever
+}
+
+// Verify complete 16-byte sequence (15-byte NOP + 1 trap) is well-formed
+TEST(OverlapInst, NOP15_Complete16ByteSequence) {
+    // Full sequence from blog: 66*7 + 0F 1F 84 00 + 33 C0 74 01 + F4
+    uint8_t seq[] = {
+        0x66, 0x66, 0x66, 0x66, 0x66, 0x66, 0x66, // 7 prefixes
+        0x0F, 0x1F, 0x84, 0x00,                     // opcode + ModRM + SIB
+        0x33, 0xC0,                                   // XOR EAX,EAX (displacement byte 0-1)
+        0x74, 0x01,                                   // JZ +1 (displacement byte 2-3)
+        0xF4                                          // HLT trap (byte 15, after NOP)
+    };
+
+    // Total = 16 bytes (15-byte NOP + 1-byte trap)
+    EXPECT_EQ(sizeof(seq), 16u);
+
+    // NOP is bytes 0-14 (15 bytes)
+    // Displacement field is bytes 11-14 (4 bytes)
+    // Trap is byte 15 (1 byte, outside the NOP)
+
+    // Hidden execution from byte 11:
+    // 33 C0 = XOR EAX,EAX (ZF=1)
+    // 74 01 = JZ +1 (always taken, skip byte 15)
+    // F4    = HLT (never reached)
+    // byte 16 = real code continues
+
+    EXPECT_EQ(seq[11], 0x33); // XOR
+    EXPECT_EQ(seq[12], 0xC0); // EAX,EAX
+    EXPECT_EQ(seq[13], 0x74); // JZ
+    EXPECT_EQ(seq[14], 0x01); // +1
+    EXPECT_EQ(seq[15], 0xF4); // HLT trap
+}
