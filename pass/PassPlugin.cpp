@@ -1,6 +1,7 @@
 #include "OpaquePredicatesPass.h"
 #include "MBAPass.h"
 #include "OverlappingInstructionsPass.h"
+#include "StringHidePass.h"
 
 #include "llvm/Passes/PassBuilder.h"
 #include "llvm/Plugins/PassPlugin.h"
@@ -13,7 +14,7 @@ extern "C" __declspec(dllexport) ::llvm::PassPluginLibraryInfo llvmGetPassPlugin
         "ShroudPasses",
         LLVM_VERSION_STRING,
         [](PassBuilder &PB) {
-            // Register individual passes
+            // Register function passes
             PB.registerPipelineParsingCallback(
                 [](StringRef Name, FunctionPassManager &FPM,
                    ArrayRef<PassBuilder::PipelineElement>) {
@@ -29,20 +30,23 @@ extern "C" __declspec(dllexport) ::llvm::PassPluginLibraryInfo llvmGetPassPlugin
                         FPM.addPass(shroud::OverlappingInstructionsPass());
                         return true;
                     }
-                    if (Name == "obfuscate-all") {
-                        FPM.addPass(shroud::MBAPass());
-                        FPM.addPass(shroud::OpaquePredicatesPass());
-                        FPM.addPass(shroud::OverlappingInstructionsPass());
-                        return true;
-                    }
                     return false;
                 });
 
-            // Also register at a late optimization point for -O1+
-            PB.registerScalarOptimizerLateEPCallback(
-                [](FunctionPassManager &FPM, OptimizationLevel Level) {
-                    // Only auto-apply at O2+ if user doesn't use explicit pass names
-                    // (This callback is for when the pass is loaded but not explicitly invoked)
+            // Register module passes
+            PB.registerPipelineParsingCallback(
+                [](StringRef Name, ModulePassManager &MPM,
+                   ArrayRef<PassBuilder::PipelineElement>) {
+                    if (Name == "string-hide") {
+                        MPM.addPass(shroud::StringHidePass());
+                        return true;
+                    }
+                    if (Name == "string-hide-only") {
+                        // Just string hiding (use after function passes)
+                        MPM.addPass(shroud::StringHidePass());
+                        return true;
+                    }
+                    return false;
                 });
         }
     };

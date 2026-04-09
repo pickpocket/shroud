@@ -10,6 +10,7 @@ add_library(ShroudPasses MODULE
     OpaquePredicatesPass.cpp
     MBAPass.cpp
     OverlappingInstructionsPass.cpp
+    StringHidePass.cpp
 )
 
 # Runtime library set via CMAKE_MSVC_RUNTIME_LIBRARY from parent
