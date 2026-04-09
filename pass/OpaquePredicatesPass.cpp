@@ -7,6 +7,8 @@
 #include "llvm/IR/Instructions.h"
 #include "llvm/IR/Constants.h"
 #include "llvm/IR/InlineAsm.h"
+#include "llvm/IR/Module.h"
+#include "llvm/TargetParser/Triple.h"
 
 using namespace llvm;
 
@@ -121,23 +123,51 @@ static Value* buildPredicate_RotateRT(IRBuilder<> &B, Value *X) {
 // ============================================================================
 // Anti-disassembly inline asm patterns (safe to execute on x86)
 // ============================================================================
-static const char* antiDisasmPatterns[] = {
-    ".byte 0xEB, 0x01, 0xE8",                              // JMP+1 over rogue CALL
-    ".byte 0xEB, 0x01, 0xE9",                              // JMP+1 over rogue JMP
-    ".byte 0xEB, 0x01, 0x68",                              // JMP+1 over rogue PUSH
-    ".byte 0xEB, 0x02, 0xE8, 0xCD",                        // JMP+2 over 2 rogue bytes
-    ".byte 0xEB, 0x05, 0xE8, 0xDE, 0xAD, 0xBE, 0xEF",     // JMP+5 over fake CALL
-    ".byte 0x0F, 0x1F, 0x00",                              // 3-byte NOP
-    ".byte 0x0F, 0x1F, 0x40, 0x00",                        // 4-byte NOP
-    ".byte 0x66, 0x0F, 0x1F, 0x84, 0x00, 0x00, 0x00, 0x00, 0x00", // 9-byte NOP
-    ".byte 0xEB, 0x06, 0xE8, 0xAA, 0xBB, 0xCC, 0xDD, 0xE9", // JMP+6 over CALL+JMP
+// Hard anti-disasm: Intel syntax (MSVC target) with opaque conditions
+static const char* antiDisasmIntel[] = {
+    "xor eax, eax\n jz 1f\n .byte 0xE8\n 1:\n",
+    "sub edx, edx\n jnz 1f\n jmp 2f\n 1: .byte 0xE9\n 2:\n",
+    "stc\n jnc 1f\n jmp 2f\n 1: .byte 0x48, 0xB8\n 2:\n",
+    "clc\n jc 1f\n jmp 2f\n 1: .byte 0xE8, 0xDE, 0xAD\n 2:\n",
+    "mov eax, 1\n test eax, eax\n jz 1f\n jmp 2f\n 1: .byte 0x0F, 0x0B\n 2:\n",
+    "xor eax, eax\n jz 1f\n .byte 0xCC, 0xCC, 0xE8\n 1:\n",
+    "jmp 1f\n .byte 0x48, 0xC7, 0xC0, 0xDE, 0xAD, 0xBE, 0xEF\n 1:\n",
+    "xor ecx, ecx\n test ecx, ecx\n jz 2f\n jnz 2f\n .byte 0xE8, 0x48, 0x89\n 2:\n",
+    ".byte 0x0F, 0x19, 0xC0",
+    ".byte 0x0F, 0x1D, 0x84, 0xDB, 0x78, 0x56, 0x34, 0x12",
+    ".byte 0xF3, 0x0F, 0x1E, 0xFA",
 };
-static constexpr int NUM_ANTIDIS = sizeof(antiDisasmPatterns) / sizeof(antiDisasmPatterns[0]);
+// AT&T syntax (GNU target)
+static const char* antiDisasmATT[] = {
+    "xorl %eax, %eax\n jz 1f\n .byte 0xE8\n 1:\n",
+    "subl %edx, %edx\n jnz 1f\n jmp 2f\n 1: .byte 0xE9\n 2:\n",
+    "stc\n jnc 1f\n jmp 2f\n 1: .byte 0x48, 0xB8\n 2:\n",
+    "clc\n jc 1f\n jmp 2f\n 1: .byte 0xE8, 0xDE, 0xAD\n 2:\n",
+    "movl $$1, %eax\n testl %eax, %eax\n jz 1f\n jmp 2f\n 1: .byte 0x0F, 0x0B\n 2:\n",
+    "xorl %eax, %eax\n jz 1f\n .byte 0xCC, 0xCC, 0xE8\n 1:\n",
+    "jmp 1f\n .byte 0x48, 0xC7, 0xC0, 0xDE, 0xAD, 0xBE, 0xEF\n 1:\n",
+    "xorl %ecx, %ecx\n testl %ecx, %ecx\n jz 2f\n jnz 2f\n .byte 0xE8, 0x48, 0x89\n 2:\n",
+    ".byte 0x0F, 0x19, 0xC0",
+    ".byte 0x0F, 0x1D, 0x84, 0xDB, 0x78, 0x56, 0x34, 0x12",
+    ".byte 0xF3, 0x0F, 0x1E, 0xFA",
+};
+static constexpr int NUM_ANTIDIS = sizeof(antiDisasmIntel) / sizeof(antiDisasmIntel[0]);
+
+static bool isIntelTarget(Function &F) {
+    Triple TT(F.getParent()->getTargetTriple());
+    return TT.isWindowsMSVCEnvironment() || TT.isWindowsItaniumEnvironment();
+}
 
 static void emitAntiDisasm(IRBuilder<> &B, ObfRNG &rng) {
+    Function *F = B.GetInsertBlock()->getParent();
+    bool intel = isIntelTarget(*F);
     FunctionType *VoidFTy = FunctionType::get(Type::getVoidTy(B.getContext()), false);
-    const char *pat = antiDisasmPatterns[rng.nextInRange(0, NUM_ANTIDIS - 1)];
-    InlineAsm *IA = InlineAsm::get(VoidFTy, pat, "", /*hasSideEffects=*/true);
+    int idx = rng.nextInRange(0, NUM_ANTIDIS - 1);
+    const char *pat = intel ? antiDisasmIntel[idx] : antiDisasmATT[idx];
+    InlineAsm *IA = InlineAsm::get(VoidFTy, pat,
+        "~{eax},~{ecx},~{edx},~{cc},~{dirflag},~{fpsr},~{flags}",
+        /*hasSideEffects=*/true, /*isAlignStack=*/false,
+        intel ? InlineAsm::AD_Intel : InlineAsm::AD_ATT);
     B.CreateCall(IA);
 }
 
