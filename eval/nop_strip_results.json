@@ -1,0 +1,35 @@
+{
+  "experiment": "NOP Removal Correctness (Experiment 3)",
+  "description": "Strip all multi-byte NOP patterns (0F 19-1F, prefix-stacked, ENDBR) from .text section",
+  "plain_binary": {
+    "nops_patched": 80,
+    "correct_password_after_strip": {
+      "exit_code": 1,
+      "output": "Access Denied.",
+      "behavior": "wrong_output"
+    },
+    "wrong_password_after_strip": {
+      "exit_code": 1,
+      "output": "Access Denied.",
+      "behavior": "wrong_output"
+    },
+    "conclusion": "Alignment-dependent code gives wrong results but does not crash"
+  },
+  "obfuscated_binary": {
+    "nops_patched": 265,
+    "correct_password_after_strip": {
+      "exit_code": 1,
+      "output": "Access Denied.",
+      "behavior": "wrong_output"
+    },
+    "wrong_password_after_strip": {
+      "exit_code": 3221225477,
+      "exit_hex": "0xC0000005",
+      "output": "",
+      "behavior": "ACCESS_VIOLATION_CRASH"
+    },
+    "conclusion": "Load-bearing NOPs severed: binary crashes with access violation"
+  },
+  "load_bearing_confirmed": true,
+  "key_finding": "NOP stripping causes ACCESS VIOLATION (0xC0000005) in obfuscated binary but only wrong output in plain binary"
+}

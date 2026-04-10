@@ -4,6 +4,7 @@
 #include "llvm/IR/IRBuilder.h"
 #include "llvm/IR/Function.h"
 #include "llvm/IR/BasicBlock.h"
+#include "llvm/IR/CFG.h"
 #include "llvm/IR/Instructions.h"
 #include "llvm/IR/Constants.h"
 #include "llvm/IR/InlineAsm.h"
@@ -280,42 +281,23 @@ static void createBogusChain(BasicBlock *FromBB, BasicBlock *RealTarget,
             "bogus." + std::to_string(rng.next32()), &F));
     }
 
+    // Bogus blocks only branch among themselves (never to RealTarget).
+    // This avoids adding new predecessors to RealTarget which would require PHI updates.
     for (int i = 0; i < chainLength; i++) {
         BasicBlock *BB = bogusBlocks[i];
         fillBogusBlock(BB, F, rng);
-
         IRBuilder<> B(BB);
-        emitAntiDisasm(B, rng);
-        Value *OV = getOpaqueVar(F, B, rng);
-        emitAntiDisasm(B, rng);
-
-        auto builder = allPredicateBuilders[rng.nextInRange(0, NUM_PRED_BUILDERS - 1)];
-        Value *Cond = builder(B, OV);
-
-        bool neg = rng.nextBool();
-        if (neg)
-            Cond = B.CreateXor(Cond, ConstantInt::getTrue(F.getContext()));
-
         emitAntiDisasm(B, rng);
 
         if (i + 1 < chainLength) {
-            if (neg) {
-                if (rng.nextBool())
-                    B.CreateCondBr(Cond, RealTarget, bogusBlocks[i + 1]);
-                else
-                    B.CreateCondBr(Cond, bogusBlocks[i + 1], RealTarget);
-            } else {
-                if (rng.nextBool())
-                    B.CreateCondBr(Cond, RealTarget, bogusBlocks[i + 1]);
-                else
-                    B.CreateCondBr(Cond, bogusBlocks[i + 1], RealTarget);
-            }
+            B.CreateBr(bogusBlocks[i + 1]);
         } else {
-            emitAntiDisasm(B, rng);
-            B.CreateBr(RealTarget);
+            // Last bogus: loop back to first (infinite dead loop among bogus blocks)
+            B.CreateBr(bogusBlocks[0]);
         }
     }
 
+    // Entry gate: FromBB gets the opaque predicate, true/false → real/bogus
     FromBB->getTerminator()->eraseFromParent();
     IRBuilder<> B(FromBB);
 
@@ -326,7 +308,6 @@ static void createBogusChain(BasicBlock *FromBB, BasicBlock *RealTarget,
     auto builder = allPredicateBuilders[rng.nextInRange(0, NUM_PRED_BUILDERS - 1)];
     Value *Cond = builder(B, OV);
 
-    // If negated: predicate is always-FALSE, so real code goes on false branch
     bool negated = rng.nextBool();
     if (negated)
         Cond = B.CreateXor(Cond, ConstantInt::getTrue(F.getContext()));
@@ -338,10 +319,7 @@ static void createBogusChain(BasicBlock *FromBB, BasicBlock *RealTarget,
     } else {
         B.CreateCondBr(Cond, RealTarget, bogusBlocks[0]);
     }
-
-    for (auto *BogBB : bogusBlocks) {
-        fixPHIsForNewPred(RealTarget, BogBB, FromBB);
-    }
+    // No PHI fixup needed: only FromBB branches to RealTarget (same as before split)
 }
 
 PreservedAnalyses OpaquePredicatesPass::run(Function &F, FunctionAnalysisManager &AM) {
@@ -361,36 +339,44 @@ PreservedAnalyses OpaquePredicatesPass::run(Function &F, FunctionAnalysisManager
         if (BB->size() < 2) continue;
         if (!rng.nextBool(0.8)) continue;
 
-        int numGates = rng.nextInRange(1, 4);
+        // Skip blocks with PHI nodes
+        if (isa<PHINode>(BB->front())) continue;
 
-        BasicBlock *CurrentBB = BB;
-        for (int gate = 0; gate < numGates; gate++) {
-            if (CurrentBB->size() < 3) break;
-
-            if (isa<PHINode>(CurrentBB->front())) break;
-
-            Instruction *splitPt = nullptr;
-            for (auto &I : *CurrentBB) {
-                if (isa<PHINode>(I) || I.isTerminator()) continue;
-                splitPt = &I;
+        // Skip blocks involved with PHI nodes (successors or predecessors)
+        bool phiRelated = false;
+        for (auto *Succ : successors(BB)) {
+            if (!Succ->empty() && isa<PHINode>(Succ->front())) {
+                phiRelated = true;
                 break;
             }
-            if (!splitPt) break;
-
-            BasicBlock *TailBB = CurrentBB->splitBasicBlock(splitPt,
-                "real." + std::to_string(rng.next32()));
-
-            if (isa<PHINode>(TailBB->front())) {
-                CurrentBB = TailBB;
-                continue;
-            }
-
-            int chainLen = rng.nextInRange(2, 5);
-            createBogusChain(CurrentBB, TailBB, F, rng, chainLen);
-            Changed = true;
-
-            CurrentBB = TailBB;
         }
+        for (auto *Pred : predecessors(BB)) {
+            if (!Pred->empty() && isa<PHINode>(Pred->front())) {
+                phiRelated = true;
+                break;
+            }
+        }
+        // Also skip if any instruction in the block is a PHI
+        for (auto &I : *BB) {
+            if (isa<PHINode>(I)) { phiRelated = true; break; }
+        }
+        if (phiRelated) continue;
+
+        // Find first non-PHI non-terminator
+        Instruction *splitPt = nullptr;
+        for (auto &I : *BB) {
+            if (isa<PHINode>(I) || I.isTerminator()) continue;
+            splitPt = &I;
+            break;
+        }
+        if (!splitPt) continue;
+
+        BasicBlock *TailBB = BB->splitBasicBlock(splitPt,
+            "real." + std::to_string(rng.next32()));
+
+        int chainLen = rng.nextInRange(2, 5);
+        createBogusChain(BB, TailBB, F, rng, chainLen);
+        Changed = true;
     }
 
     return Changed ? PreservedAnalyses::none() : PreservedAnalyses::all();

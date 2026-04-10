@@ -133,6 +133,9 @@ PreservedAnalyses MBAPass::run(Function &F, FunctionAnalysisManager &AM) {
 
     for (int round = 0; round < 3; round++) {
         for (auto &BB : F) {
+            // Skip blocks with PHI nodes entirely to avoid PHI placement issues
+            if (!BB.empty() && isa<PHINode>(BB.front())) continue;
+
             for (auto I = BB.begin(), E = BB.end(); I != E; ) {
                 Instruction &Inst = *I++;
                 auto *BinOp = dyn_cast<BinaryOperator>(&Inst);
