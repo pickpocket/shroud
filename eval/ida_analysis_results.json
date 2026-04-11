@@ -1,0 +1,48 @@
+{
+  "experiment": "IDA Pro Analysis (Experiments 1 & 2)",
+  "tool": "IDA Pro 9.x with Hex-Rays decompiler",
+  "benchmarks": {
+    "sort": {
+      "plain": {
+        "functions": 511,
+        "code_range": "0x140001000 - 0x14002A000",
+        "code_size_hex": "0x29000",
+        "decompile_main": "SUCCESS (clean, readable)",
+        "decompile_lines": 150
+      },
+      "obfuscated": {
+        "functions": 511,
+        "code_range": "0x140001000 - 0x140511000",
+        "code_size_hex": "0x510000",
+        "decompile_main": "FAIL (JUMPOUT after 5 lines)",
+        "decompile_output": "JUMPOUT(0x140001072LL)"
+      }
+    },
+    "rc4": {
+      "plain": {
+        "functions": 507,
+        "code_range": "0x140001000 - 0x14002A000",
+        "code_size_hex": "0x29000",
+        "decompile_main": "SUCCESS"
+      },
+      "obfuscated": {
+        "functions": 506,
+        "code_range": "0x140001000 - 0x140258000",
+        "code_size_hex": "0x257000",
+        "decompile_main": "FAIL (JUMPOUT after 5 lines)",
+        "decompile_output": "JUMPOUT(0x140001047LL)",
+        "string_hiding": "CONFIRMED (no 'RESULT: PASS' string found)"
+      }
+    }
+  },
+  "summary": {
+    "plain_decompile_success": "2/2",
+    "obfuscated_decompile_success": "0/2",
+    "hex_rays_defeat": "Complete - JUMPOUT on all obfuscated functions",
+    "string_hiding_effective": true,
+    "code_size_increase": {
+      "sort": "0x29000 -> 0x510000 (31x)",
+      "rc4": "0x29000 -> 0x257000 (14x)"
+    }
+  }
+}

@@ -1,0 +1,62 @@
+{
+  "experiment": "NOP Removal Correctness (Experiment 3)",
+  "method": "Replace all 0F 19-1F, prefix-stacked, and ENDBR NOP patterns with 0x90",
+  "benchmarks": {
+    "crackme": {
+      "nops_patched": 265,
+      "obf_works": true,
+      "stripped_wrong_pw": {
+        "exit": 139,
+        "signal": "SIGSEGV",
+        "behavior": "CRASH"
+      },
+      "stripped_correct_pw": {
+        "exit": 1,
+        "output": "Access Denied.",
+        "behavior": "wrong_output"
+      }
+    },
+    "sort": {
+      "nops_patched": 490,
+      "obf_works": true,
+      "stripped": {
+        "exit": 139,
+        "signal": "SIGSEGV",
+        "behavior": "CRASH"
+      }
+    },
+    "hashtable": {
+      "nops_patched": 584,
+      "obf_works": true,
+      "stripped": {
+        "exit": 139,
+        "signal": "SIGSEGV",
+        "behavior": "CRASH"
+      }
+    },
+    "rc4": {
+      "nops_patched": 315,
+      "obf_works": true,
+      "stripped": {
+        "exit": 1,
+        "behavior": "wrong_output"
+      }
+    },
+    "argparse": {
+      "nops_patched": 472,
+      "obf_works": true,
+      "stripped": {
+        "exit": -999,
+        "behavior": "TIMEOUT_OR_HANG"
+      }
+    }
+  },
+  "summary": {
+    "total_benchmarks": 5,
+    "crash_on_strip": 3,
+    "wrong_output_on_strip": 1,
+    "hang_on_strip": 1,
+    "survived_strip": 0,
+    "conclusion": "Load-bearing NOPs confirmed: NOP stripping causes SIGSEGV on 3/5 benchmarks, wrong output on 1, hang on 1. Zero survived intact."
+  }
+}
