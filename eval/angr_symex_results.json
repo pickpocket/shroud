@@ -1,0 +1,24 @@
+{
+  "plain": {
+    "binary": "crackme_plain.exe",
+    "note": "using entry point, main not found",
+    "main_addr": "0x1400013f8",
+    "functions_found": 733,
+    "outcome": "STATE_EXPLOSION",
+    "steps": 121,
+    "active_states": 0,
+    "deadended_states": 0,
+    "time_sec": 6.6
+  },
+  "obfuscated": {
+    "binary": "crackme_obf.exe",
+    "note": "using entry point, main not found",
+    "main_addr": "0x1408d02b0",
+    "functions_found": 952,
+    "outcome": "STATE_EXPLOSION",
+    "steps": 121,
+    "active_states": 0,
+    "deadended_states": 0,
+    "time_sec": 38.33
+  }
+}

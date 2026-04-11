@@ -1,0 +1,50 @@
+{
+  "crackme_plain": {
+    "binary": "crackme_plain.exe",
+    "path": "C:\\Users\\Treverm\\Documents\\Claude Code\\llvm-obfuscator\\eval\\crackme_plain.exe",
+    "time_sec": 7.74,
+    "functions": 733,
+    "success": false,
+    "error": "object of type 'generator' has no len()"
+  },
+  "crackme_obf": {
+    "binary": "crackme_obf.exe",
+    "path": "C:\\obf-build\\crackme_obf.exe",
+    "time_sec": 34.31,
+    "functions": 952,
+    "success": false,
+    "error": "object of type 'generator' has no len()"
+  },
+  "sort_plain": {
+    "binary": "sort_plain.exe",
+    "path": "C:\\Users\\Treverm\\Documents\\Claude Code\\llvm-obfuscator\\eval\\benchmarks\\sort_plain.exe",
+    "time_sec": 5.33,
+    "functions": 766,
+    "success": false,
+    "error": "object of type 'generator' has no len()"
+  },
+  "sort_obf": {
+    "binary": "sort_obf.exe",
+    "path": "C:\\Users\\Treverm\\Documents\\Claude Code\\llvm-obfuscator\\eval\\benchmarks\\sort_obf.exe",
+    "time_sec": 23.47,
+    "functions": 1191,
+    "success": false,
+    "error": "object of type 'generator' has no len()"
+  },
+  "rc4_plain": {
+    "binary": "rc4_plain.exe",
+    "path": "C:\\Users\\Treverm\\Documents\\Claude Code\\llvm-obfuscator\\eval\\benchmarks\\rc4_plain.exe",
+    "time_sec": 5.26,
+    "functions": 751,
+    "success": false,
+    "error": "object of type 'generator' has no len()"
+  },
+  "rc4_obf": {
+    "binary": "rc4_obf.exe",
+    "path": "C:\\Users\\Treverm\\Documents\\Claude Code\\llvm-obfuscator\\eval\\benchmarks\\rc4_obf.exe",
+    "time_sec": 13.27,
+    "functions": 1018,
+    "success": false,
+    "error": "object of type 'generator' has no len()"
+  }
+}
