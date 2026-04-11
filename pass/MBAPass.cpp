@@ -165,10 +165,12 @@ PreservedAnalyses MBAPass::run(Function &F, FunctionAnalysisManager &AM) {
     }
 
     if (!AuxVar) {
+        // Insert after all PHI nodes in the entry block
+        Instruction *InsertPt = &*F.getEntryBlock().getFirstNonPHIIt();
         for (auto &Arg : F.args()) {
             if (Arg.getType()->isIntegerTy(32)) { AuxVar = &Arg; break; }
             if (Arg.getType()->isIntegerTy()) {
-                IRBuilder<> B(&F.getEntryBlock().front());
+                IRBuilder<> B(InsertPt);
                 AuxVar = B.CreateZExtOrTrunc(&Arg, Type::getInt32Ty(F.getContext()));
                 break;
             }
@@ -178,7 +180,7 @@ PreservedAnalyses MBAPass::run(Function &F, FunctionAnalysisManager &AM) {
                 Type::getInt32Ty(F.getContext()), false, GlobalValue::PrivateLinkage,
                 ConstantInt::get(Type::getInt32Ty(F.getContext()), rng.next32()),
                 ".x" + std::to_string(rng.next32()));
-            IRBuilder<> B(&F.getEntryBlock().front());
+            IRBuilder<> B(InsertPt);
             auto *Load = B.CreateLoad(Type::getInt32Ty(F.getContext()), GV);
             Load->setVolatile(true); AuxVar = Load;
         }
@@ -187,6 +189,8 @@ PreservedAnalyses MBAPass::run(Function &F, FunctionAnalysisManager &AM) {
     for (auto &BB : F) {
         for (auto I = BB.begin(), E = BB.end(); I != E; ) {
             Instruction &Inst = *I++;
+            // Never insert before PHI nodes — PHIs must be grouped at block top
+            if (isa<PHINode>(Inst)) continue;
             for (unsigned op = 0; op < Inst.getNumOperands(); op++) {
                 auto *CI = dyn_cast<ConstantInt>(Inst.getOperand(op));
                 if (!CI || !CI->getType()->isIntegerTy(32)) continue;
