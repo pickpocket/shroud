@@ -99,8 +99,8 @@ generateDynamicPattern(ObfRNG &rng, bool intel) {
 
     int strategy;
     int roll = rng.nextInRange(0, 99);
-    if (roll < 12)
-        strategy = 46 + rng.nextInRange(0, 19); // exotic instructions (46-65)
+    if (roll < 15)
+        strategy = 46 + rng.nextInRange(0, 39); // exotic + unhinged (46-85)
     else if (roll < 24)
         strategy = 40 + rng.nextInRange(0, 5);  // RET-based NOP jump (40-45)
     else if (roll < 36)
@@ -1238,9 +1238,422 @@ generateDynamicPattern(ObfRNG &rng, bool intel) {
         asm_ss << Lexit << ":\n";
         break;
     }
+
+    // ================================================================
+    // UNHINGED STRATEGIES (66-85)
+    // ================================================================
+
+    case 66: {
+        // CPUID opaque: CPUID with EAX=0 always sets EBX=0x756E6547 ("Genu") on Intel
+        // Compare against known value → always true on Intel CPUs
+        std::string Lexit = ".Ls" + std::to_string(labelCounter++) + "x";
+        if (intel) {
+            asm_ss << "xor eax, eax\n";
+            asm_ss << "cpuid\n"; // EBX = "Genu" on Intel
+            asm_ss << "test ebx, ebx\n"; // always nonzero
+            asm_ss << "jnz " << Lexit << "\n";
+        } else {
+            asm_ss << "xorl %eax, %eax\n";
+            asm_ss << "cpuid\n";
+            asm_ss << "testl %ebx, %ebx\n";
+            asm_ss << "jnz " << Lexit << "\n";
+        }
+        asm_ss << ".byte 0xF4\n";
+        asm_ss << Lexit << ":\n";
+        break;
+    }
+    case 67: {
+        // RDTSC opaque: timestamp counter is never zero
+        std::string Lexit = ".Ls" + std::to_string(labelCounter++) + "x";
+        if (intel) {
+            asm_ss << "rdtsc\n"; // EDX:EAX = timestamp (always nonzero)
+            asm_ss << "or eax, edx\n"; // combine high and low
+            asm_ss << "jnz " << Lexit << "\n"; // practically always taken
+        } else {
+            asm_ss << "rdtsc\n";
+            asm_ss << "orl %edx, %eax\n";
+            asm_ss << "jnz " << Lexit << "\n";
+        }
+        asm_ss << ".byte 0xF4\n";
+        asm_ss << Lexit << ":\n";
+        break;
+    }
+    case 68: {
+        // CWD sign-extend chain: MOV AX,1 → CWD → DX=0 → test → JZ
+        std::string Lexit = ".Ls" + std::to_string(labelCounter++) + "x";
+        if (intel) {
+            asm_ss << "mov ax, 1\n"; // positive
+            asm_ss << "cwd\n"; // DX = sign(AX) = 0
+            asm_ss << "test dx, dx\n";
+            asm_ss << "jz " << Lexit << "\n";
+        } else {
+            asm_ss << "movw $1, %ax\n";
+            asm_ss << "cwd\n";
+            asm_ss << "testw %dx, %dx\n";
+            asm_ss << "jz " << Lexit << "\n";
+        }
+        asm_ss << ".byte 0xCC\n";
+        asm_ss << Lexit << ":\n";
+        break;
+    }
+    case 69: {
+        // NEG+NEG = identity: NEG twice restores original value
+        std::string Lexit = ".Ls" + std::to_string(labelCounter++) + "x";
+        uint32_t val = rng.nextInRange(1, 0x7FFFFFFF);
+        if (intel) {
+            asm_ss << "mov " << reg << ", " << std::dec << val << "\n";
+            asm_ss << "neg " << reg << "\n";
+            asm_ss << "neg " << reg << "\n"; // back to original
+            asm_ss << "cmp " << reg << ", " << std::dec << val << "\n";
+            asm_ss << "jz " << Lexit << "\n";
+        } else {
+            asm_ss << "movl $" << std::dec << val << ", " << reg << "\n";
+            asm_ss << "negl " << reg << "\n";
+            asm_ss << "negl " << reg << "\n";
+            asm_ss << "cmpl $" << std::dec << val << ", " << reg << "\n";
+            asm_ss << "jz " << Lexit << "\n";
+        }
+        asm_ss << ".byte 0xF4\n";
+        asm_ss << Lexit << ":\n";
+        break;
+    }
+    case 70: {
+        // NOT+NOT = identity
+        std::string Lexit = ".Ls" + std::to_string(labelCounter++) + "x";
+        uint32_t val = rng.nextInRange(1, 0x7FFFFFFF);
+        if (intel) {
+            asm_ss << "mov " << reg << ", " << std::dec << val << "\n";
+            asm_ss << "not " << reg << "\n";
+            asm_ss << "not " << reg << "\n";
+            asm_ss << "cmp " << reg << ", " << std::dec << val << "\n";
+            asm_ss << "jz " << Lexit << "\n";
+        } else {
+            asm_ss << "movl $" << std::dec << val << ", " << reg << "\n";
+            asm_ss << "notl " << reg << "\n";
+            asm_ss << "notl " << reg << "\n";
+            asm_ss << "cmpl $" << std::dec << val << ", " << reg << "\n";
+            asm_ss << "jz " << Lexit << "\n";
+        }
+        asm_ss << ".byte 0xCC\n";
+        asm_ss << Lexit << ":\n";
+        break;
+    }
+    case 71: {
+        // ROL+ROR = identity: rotate left then right by same amount
+        std::string Lexit = ".Ls" + std::to_string(labelCounter++) + "x";
+        uint32_t val = rng.nextInRange(1, 0x7FFFFFFF);
+        int rot = rng.nextInRange(1, 31);
+        if (intel) {
+            asm_ss << "mov " << reg << ", " << std::dec << val << "\n";
+            asm_ss << "rol " << reg << ", " << rot << "\n";
+            asm_ss << "ror " << reg << ", " << rot << "\n";
+            asm_ss << "cmp " << reg << ", " << std::dec << val << "\n";
+            asm_ss << "jz " << Lexit << "\n";
+        } else {
+            asm_ss << "movl $" << std::dec << val << ", " << reg << "\n";
+            asm_ss << "rol $" << rot << ", " << reg << "\n";
+            asm_ss << "ror $" << rot << ", " << reg << "\n";
+            asm_ss << "cmpl $" << std::dec << val << ", " << reg << "\n";
+            asm_ss << "jz " << Lexit << "\n";
+        }
+        asm_ss << ".byte 0xF4\n";
+        asm_ss << Lexit << ":\n";
+        break;
+    }
+    case 72: {
+        // INC+DEC = identity (x86-64 uses FF /0 and FF /1, not the short form)
+        std::string Lexit = ".Ls" + std::to_string(labelCounter++) + "x";
+        if (intel) {
+            asm_ss << "xor " << reg << ", " << reg << "\n";
+            asm_ss << "inc " << reg << "\n"; // reg=1
+            asm_ss << "dec " << reg << "\n"; // reg=0
+            asm_ss << "test " << reg << ", " << reg << "\n";
+            asm_ss << "jz " << Lexit << "\n";
+        } else {
+            asm_ss << "xorl " << reg << ", " << reg << "\n";
+            asm_ss << "incl " << reg << "\n";
+            asm_ss << "decl " << reg << "\n";
+            asm_ss << "testl " << reg << ", " << reg << "\n";
+            asm_ss << "jz " << Lexit << "\n";
+        }
+        asm_ss << ".byte 0xEB, 0xFE\n";
+        asm_ss << Lexit << ":\n";
+        break;
+    }
+    case 73: {
+        // SHL+SHR annihilation: shift left then right by same amount clears low bits
+        // SHL 4 then SHR 4 on 0xF0 → 0xF0 still (high nibble preserved)
+        std::string Lexit = ".Ls" + std::to_string(labelCounter++) + "x";
+        if (intel) {
+            asm_ss << "mov " << reg << ", 0xF0\n";
+            asm_ss << "shl " << reg << ", 4\n";  // 0xF00
+            asm_ss << "shr " << reg << ", 4\n";  // 0xF0
+            asm_ss << "cmp " << reg << ", 0xF0\n";
+            asm_ss << "jz " << Lexit << "\n";
+        } else {
+            asm_ss << "movl $0xF0, " << reg << "\n";
+            asm_ss << "shll $4, " << reg << "\n";
+            asm_ss << "shrl $4, " << reg << "\n";
+            asm_ss << "cmpl $0xF0, " << reg << "\n";
+            asm_ss << "jz " << Lexit << "\n";
+        }
+        asm_ss << ".byte 0xF4\n";
+        asm_ss << Lexit << ":\n";
+        break;
+    }
+    case 74: {
+        // LEA arithmetic opaque: LEA does math without setting flags
+        // LEA reg, [reg+reg] = 2*reg, then CMP with known value
+        std::string Lexit = ".Ls" + std::to_string(labelCounter++) + "x";
+        if (intel) {
+            asm_ss << "mov " << reg << ", 21\n";
+            asm_ss << "lea " << reg << ", [" << reg << "+" << reg << "]\n"; // reg = 42
+            asm_ss << "cmp " << reg << ", 42\n";
+            asm_ss << "jz " << Lexit << "\n";
+        } else {
+            asm_ss << "movl $21, " << reg << "\n";
+            asm_ss << "lea (" << reg << "," << reg << "), " << reg << "\n";
+            asm_ss << "cmpl $42, " << reg << "\n";
+            asm_ss << "jz " << Lexit << "\n";
+        }
+        asm_ss << ".byte 0xCC\n";
+        asm_ss << Lexit << ":\n";
+        break;
+    }
+    case 75: {
+        // IMUL known values: IMUL reg, reg, imm → reg = known product
+        std::string Lexit = ".Ls" + std::to_string(labelCounter++) + "x";
+        if (intel) {
+            asm_ss << "mov " << reg << ", 7\n";
+            asm_ss << "imul " << reg << ", " << reg << ", 6\n"; // 7*6=42
+            asm_ss << "cmp " << reg << ", 42\n";
+            asm_ss << "jz " << Lexit << "\n";
+        } else {
+            asm_ss << "movl $7, " << reg << "\n";
+            asm_ss << "imull $6, " << reg << ", " << reg << "\n";
+            asm_ss << "cmpl $42, " << reg << "\n";
+            asm_ss << "jz " << Lexit << "\n";
+        }
+        asm_ss << ".byte 0xF4\n";
+        asm_ss << Lexit << ":\n";
+        break;
+    }
+    case 76: {
+        // SETCC chain: XOR→SETZ→TEST→JNZ (set byte from flags, test the byte)
+        std::string Lexit = ".Ls" + std::to_string(labelCounter++) + "x";
+        if (intel) {
+            asm_ss << "xor " << reg << ", " << reg << "\n"; // ZF=1
+            asm_ss << "setz al\n"; // AL=1 (ZF was set)
+            asm_ss << "test al, al\n"; // nonzero
+            asm_ss << "jnz " << Lexit << "\n";
+        } else {
+            asm_ss << "xorl " << reg << ", " << reg << "\n";
+            asm_ss << "setz %al\n";
+            asm_ss << "testb %al, %al\n";
+            asm_ss << "jnz " << Lexit << "\n";
+        }
+        asm_ss << ".byte 0xF4\n";
+        asm_ss << Lexit << ":\n";
+        break;
+    }
+    case 77: {
+        // CMOVZ opaque: MOV known → XOR self → CMOVZ loads another known value
+        // CMOV doesn't exist as a branch, so symbolic execution must handle it
+        std::string Lexit = ".Ls" + std::to_string(labelCounter++) + "x";
+        int regIdx2 = (regIdx + 1) % NUM_GPR32;
+        const char *reg2 = intel ? gpr32_intel[regIdx2] : gpr32_att[regIdx2];
+        if (intel) {
+            asm_ss << "mov " << reg << ", 0\n";
+            asm_ss << "mov " << reg2 << ", 42\n";
+            asm_ss << "test " << reg << ", " << reg << "\n"; // ZF=1 (reg=0)
+            asm_ss << "cmovz " << reg << ", " << reg2 << "\n"; // reg=42 (ZF was 1)
+            asm_ss << "cmp " << reg << ", 42\n";
+            asm_ss << "jz " << Lexit << "\n";
+        } else {
+            asm_ss << "movl $0, " << reg << "\n";
+            asm_ss << "movl $42, " << reg2 << "\n";
+            asm_ss << "testl " << reg << ", " << reg << "\n";
+            asm_ss << "cmovzl " << reg2 << ", " << reg << "\n";
+            asm_ss << "cmpl $42, " << reg << "\n";
+            asm_ss << "jz " << Lexit << "\n";
+        }
+        asm_ss << ".byte 0xCC\n";
+        asm_ss << Lexit << ":\n";
+        break;
+    }
+    case 78: {
+        // XADD opaque: XADD swaps and adds. XADD reg,reg = reg*2
+        // reg=21 → XADD reg,reg → reg=42 (dst=src+dst, src=old_dst)
+        std::string Lexit = ".Ls" + std::to_string(labelCounter++) + "x";
+        int regIdx2 = (regIdx + 1) % NUM_GPR32;
+        const char *reg2 = intel ? gpr32_intel[regIdx2] : gpr32_att[regIdx2];
+        if (intel) {
+            asm_ss << "mov " << reg << ", 21\n";
+            asm_ss << "mov " << reg2 << ", 21\n";
+            asm_ss << "xadd " << reg << ", " << reg2 << "\n"; // reg=42, reg2=21
+            asm_ss << "cmp " << reg << ", 42\n";
+            asm_ss << "jz " << Lexit << "\n";
+        } else {
+            asm_ss << "movl $21, " << reg << "\n";
+            asm_ss << "movl $21, " << reg2 << "\n";
+            asm_ss << "xadd " << reg << ", " << reg2 << "\n";
+            asm_ss << "cmpl $42, " << reg << "\n";
+            asm_ss << "jz " << Lexit << "\n";
+        }
+        asm_ss << ".byte 0xF4\n";
+        asm_ss << Lexit << ":\n";
+        break;
+    }
+    case 79: {
+        // CMPXCHG opaque: if EAX==dst, store src→dst and ZF=1
+        // Set EAX=reg=same value → compare succeeds → ZF=1 → JZ
+        std::string Lexit = ".Ls" + std::to_string(labelCounter++) + "x";
+        int regIdx2 = (regIdx + 1) % NUM_GPR32;
+        const char *reg2 = intel ? gpr32_intel[regIdx2] : gpr32_att[regIdx2];
+        uint32_t val = rng.nextInRange(1, 0x7FFFFFFF);
+        if (intel) {
+            asm_ss << "mov eax, " << std::dec << val << "\n";
+            asm_ss << "mov " << reg2 << ", " << std::dec << val << "\n";
+            asm_ss << "mov " << reg << ", 999\n"; // src (doesn't matter)
+            asm_ss << "cmpxchg " << reg2 << ", " << reg << "\n"; // EAX==reg2 → ZF=1
+            asm_ss << "jz " << Lexit << "\n";
+        } else {
+            asm_ss << "movl $" << std::dec << val << ", %eax\n";
+            asm_ss << "movl $" << std::dec << val << ", " << reg2 << "\n";
+            asm_ss << "movl $999, " << reg << "\n";
+            asm_ss << "cmpxchg " << reg << ", " << reg2 << "\n";
+            asm_ss << "jz " << Lexit << "\n";
+        }
+        asm_ss << ".byte 0xEB, 0xFE\n";
+        asm_ss << Lexit << ":\n";
+        break;
+    }
+    case 80: {
+        // AAA-style: legacy BCD adjust. On x86-64 these are invalid, but
+        // we can use PUSHF to encode a flag state, XOR AH with magic, SAHF → known flags
+        // Triple indirection: compute → flag → register → flag → branch
+        std::string Lexit = ".Ls" + std::to_string(labelCounter++) + "x";
+        if (intel) {
+            asm_ss << "xor eax, eax\n"; // ZF=1
+            asm_ss << "lahf\n"; // AH = flags
+            asm_ss << "xor ah, ah\n"; // AH = 0
+            asm_ss << "or ah, 0x40\n"; // set ZF bit in AH
+            asm_ss << "sahf\n"; // flags = AH (ZF=1)
+            asm_ss << "jz " << Lexit << "\n";
+        } else {
+            asm_ss << "xorl %eax, %eax\n";
+            asm_ss << "lahf\n";
+            asm_ss << "xorb %ah, %ah\n";
+            asm_ss << "orb $0x40, %ah\n";
+            asm_ss << "sahf\n";
+            asm_ss << "jz " << Lexit << "\n";
+        }
+        asm_ss << ".byte 0xF4\n";
+        asm_ss << Lexit << ":\n";
+        break;
+    }
+    case 81: {
+        // SHLD/SHRD double shift: SHLD reg1,reg2,0 = no change (shift by 0)
+        std::string Lexit = ".Ls" + std::to_string(labelCounter++) + "x";
+        int regIdx2 = (regIdx + 1) % NUM_GPR32;
+        const char *reg2 = intel ? gpr32_intel[regIdx2] : gpr32_att[regIdx2];
+        uint32_t val = rng.nextInRange(1, 0x7FFFFFFF);
+        if (intel) {
+            asm_ss << "mov " << reg << ", " << std::dec << val << "\n";
+            asm_ss << "mov " << reg2 << ", 0xDEADBEEF\n";
+            asm_ss << "shld " << reg << ", " << reg2 << ", 0\n"; // shift by 0 = noop
+            asm_ss << "cmp " << reg << ", " << std::dec << val << "\n";
+            asm_ss << "jz " << Lexit << "\n";
+        } else {
+            asm_ss << "movl $" << std::dec << val << ", " << reg << "\n";
+            asm_ss << "movl $0xDEADBEEF, " << reg2 << "\n";
+            asm_ss << "shld $0, " << reg2 << ", " << reg << "\n";
+            asm_ss << "cmpl $" << std::dec << val << ", " << reg << "\n";
+            asm_ss << "jz " << Lexit << "\n";
+        }
+        asm_ss << ".byte 0xCC\n";
+        asm_ss << Lexit << ":\n";
+        break;
+    }
+    case 82: {
+        // PAUSE (F3 90) as a NOP with different encoding. PAUSE + opaque
+        std::string Lexit = ".Ls" + std::to_string(labelCounter++) + "x";
+        if (intel) asm_ss << "xor " << reg << ", " << reg << "\n";
+        else       asm_ss << "xorl " << reg << ", " << reg << "\n";
+        asm_ss << ".byte 0xF3, 0x90\n"; // PAUSE (NOP with rep prefix)
+        asm_ss << ".byte 0xF3, 0x90\n"; // another PAUSE
+        asm_ss << ".byte 0xF3, 0x90\n"; // and another
+        if (intel) asm_ss << "test " << reg << ", " << reg << "\n";
+        else       asm_ss << "testl " << reg << ", " << reg << "\n";
+        asm_ss << "jz " << Lexit << "\n";
+        asm_ss << ".byte 0xF4\n";
+        asm_ss << Lexit << ":\n";
+        break;
+    }
+    case 83: {
+        // LFENCE/SFENCE/MFENCE as fancy NOPs between opaque predicate steps
+        std::string Lexit = ".Ls" + std::to_string(labelCounter++) + "x";
+        if (intel) asm_ss << "xor " << reg << ", " << reg << "\n";
+        else       asm_ss << "xorl " << reg << ", " << reg << "\n";
+        asm_ss << ".byte 0x0F, 0xAE, 0xE8\n"; // LFENCE
+        asm_ss << ".byte 0x0F, 0xAE, 0xF0\n"; // MFENCE
+        asm_ss << ".byte 0x0F, 0xAE, 0xF8\n"; // SFENCE
+        if (intel) asm_ss << "test " << reg << ", " << reg << "\n";
+        else       asm_ss << "testl " << reg << ", " << reg << "\n";
+        asm_ss << "jz " << Lexit << "\n";
+        asm_ss << ".byte 0xEB, 0xFE\n";
+        asm_ss << Lexit << ":\n";
+        break;
+    }
+    case 84: {
+        // PREFETCHNTA as cover: prefetch hint does nothing visible but takes bytes
+        std::string Lexit = ".Ls" + std::to_string(labelCounter++) + "x";
+        if (intel) asm_ss << "sub " << reg << ", " << reg << "\n";
+        else       asm_ss << "subl " << reg << ", " << reg << "\n";
+        asm_ss << ".byte 0x0F, 0x18, 0x00\n"; // PREFETCHNTA [EAX] (harmless)
+        asm_ss << "jz " << Lexit << "\n"; // ZF still 1 from SUB
+        asm_ss << ".byte 0xF4\n";
+        asm_ss << Lexit << ":\n";
+        break;
+    }
+    case 85: {
+        // Kitchen sink: RDTSC + BSWAP + CPUID + LAHF + BT + CMC + RET through NOP
+        // Maximum confusion: 7 different instruction classes in one block
+        std::string Lexit = ".Ls" + std::to_string(labelCounter++) + "x";
+        std::string Ladj = ".Ls" + std::to_string(labelCounter++) + "j";
+        uint8_t nopOp = 0x19 + rng.nextInRange(0, 6);
+        asm_ss << "call " << Ladj << "\n";
+        asm_ss << ".byte 0x0F, 0x" << std::hex << (int)nopOp << ", 0x84, 0x00\n";
+        asm_ss << L1 << ":\n";
+        // Actual exit
+        asm_ss << "jmp " << Lexit << "\n";
+        asm_ss << ".byte 0x" << std::hex << rng.nextInRange(0,255) << "\n";
+        // Adjustment routine: adjust return addr, but first do a bunch of silly stuff
+        asm_ss << Ladj << ":\n";
+        if (intel) {
+            asm_ss << "rdtsc\n"; // clobber EAX:EDX with timestamp
+            asm_ss << "bswap eax\n"; // reverse bytes (why not)
+            asm_ss << "bswap eax\n"; // reverse back (identity)
+            asm_ss << "lahf\n"; // store flags in AH
+            asm_ss << "sahf\n"; // restore flags from AH (identity)
+            asm_ss << "stc\n"; asm_ss << "cmc\n"; // CF=0
+            asm_ss << "add qword ptr [rsp], 4\n";
+        } else {
+            asm_ss << "rdtsc\n";
+            asm_ss << "bswap %eax\n";
+            asm_ss << "bswap %eax\n";
+            asm_ss << "lahf\n";
+            asm_ss << "sahf\n";
+            asm_ss << "stc\n"; asm_ss << "cmc\n";
+            asm_ss << "addq $4, (%rsp)\n";
+        }
+        asm_ss << "ret\n";
+        asm_ss << Lexit << ":\n";
+        break;
+    }
     }
 
-    clob_ss << "~{" << clobber << "},~{cc},~{dirflag},~{fpsr},~{flags},~{memory}";
+    clob_ss << "~{eax},~{ebx},~{ecx},~{edx},~{esi},~{edi},~{cc},~{dirflag},~{fpsr},~{flags},~{memory}";
 
     return { asm_ss.str(), clob_ss.str() };
 }
