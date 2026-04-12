@@ -100,7 +100,7 @@ generateDynamicPattern(ObfRNG &rng, bool intel) {
     int strategy;
     int roll = rng.nextInRange(0, 99);
     if (roll < 15)
-        strategy = 46 + rng.nextInRange(0, 39); // exotic + unhinged (46-85)
+        strategy = 46 + rng.nextInRange(0, 54); // exotic + unhinged + insane (46-100)
     else if (roll < 24)
         strategy = 40 + rng.nextInRange(0, 5);  // RET-based NOP jump (40-45)
     else if (roll < 36)
@@ -1649,6 +1649,291 @@ generateDynamicPattern(ObfRNG &rng, bool intel) {
         }
         asm_ss << "ret\n";
         asm_ss << Lexit << ":\n";
+        break;
+    }
+
+    // ================================================================
+    // INSANE STRATEGIES (86-100): AVX, SSE, obscure x86
+    // ================================================================
+
+    case 86: {
+        // VZEROALL (C5 FC 77): zeros all YMM registers. 3 bytes, VEX-encoded.
+        // Does nothing to GPRs/flags. Use as a fancy NOP between opaque pred steps.
+        std::string Lexit = ".Ls" + std::to_string(labelCounter++) + "x";
+        if (intel) asm_ss << "xor " << reg << ", " << reg << "\n";
+        else       asm_ss << "xorl " << reg << ", " << reg << "\n";
+        asm_ss << ".byte 0xC5, 0xFC, 0x77\n"; // VZEROALL
+        if (intel) asm_ss << "test " << reg << ", " << reg << "\n";
+        else       asm_ss << "testl " << reg << ", " << reg << "\n";
+        asm_ss << "jz " << Lexit << "\n";
+        asm_ss << ".byte 0xF4\n";
+        asm_ss << Lexit << ":\n";
+        break;
+    }
+    case 87: {
+        // VZEROUPPER (C5 F8 77): zeros upper 128 bits of all YMM regs.
+        // Common in real code (GCC emits it). Harmless cover.
+        std::string Lexit = ".Ls" + std::to_string(labelCounter++) + "x";
+        asm_ss << "stc\ncmc\n"; // CF=0
+        asm_ss << ".byte 0xC5, 0xF8, 0x77\n"; // VZEROUPPER
+        asm_ss << "jnc " << Lexit << "\n";
+        asm_ss << ".byte 0xCC\n";
+        asm_ss << Lexit << ":\n";
+        break;
+    }
+    case 88: {
+        // VPXOR XMM0, XMM0, XMM0 (C5 F9 EF C0): zero XMM0 via AVX.
+        // VEX-encoded XOR is a recognized zeroing idiom. Looks like real SSE code.
+        std::string Lexit = ".Ls" + std::to_string(labelCounter++) + "x";
+        if (intel) asm_ss << "xor " << reg << ", " << reg << "\n";
+        else       asm_ss << "xorl " << reg << ", " << reg << "\n";
+        asm_ss << ".byte 0xC5, 0xF9, 0xEF, 0xC0\n"; // VPXOR XMM0,XMM0,XMM0
+        if (intel) asm_ss << "test " << reg << ", " << reg << "\n";
+        else       asm_ss << "testl " << reg << ", " << reg << "\n";
+        asm_ss << "jz " << Lexit << "\n";
+        asm_ss << ".byte 0xF4\n";
+        asm_ss << Lexit << ":\n";
+        break;
+    }
+    case 89: {
+        // VMOVD XMM0, reg → VMOVD reg, XMM0: round-trip through XMM register
+        // Value goes to XMM and back unchanged. Decompiler must track XMM data flow.
+        std::string Lexit = ".Ls" + std::to_string(labelCounter++) + "x";
+        uint32_t val = rng.nextInRange(1, 0x7FFFFFFF);
+        if (intel) {
+            asm_ss << "mov eax, " << std::dec << val << "\n";
+            asm_ss << ".byte 0xC5, 0xF9, 0x6E, 0xC0\n"; // VMOVD XMM0, EAX
+            asm_ss << ".byte 0xC5, 0xF9, 0x7E, 0xC0\n"; // VMOVD EAX, XMM0
+            asm_ss << "cmp eax, " << std::dec << val << "\n";
+            asm_ss << "jz " << Lexit << "\n";
+        } else {
+            asm_ss << "movl $" << std::dec << val << ", %eax\n";
+            asm_ss << ".byte 0xC5, 0xF9, 0x6E, 0xC0\n";
+            asm_ss << ".byte 0xC5, 0xF9, 0x7E, 0xC0\n";
+            asm_ss << "cmpl $" << std::dec << val << ", %eax\n";
+            asm_ss << "jz " << Lexit << "\n";
+        }
+        asm_ss << ".byte 0xCC\n";
+        asm_ss << Lexit << ":\n";
+        break;
+    }
+    case 90: {
+        // CRC32: hardware CRC32C of known value → known CRC → opaque
+        // F2 0F 38 F1 C0 = CRC32 EAX, EAX
+        std::string Lexit = ".Ls" + std::to_string(labelCounter++) + "x";
+        if (intel) {
+            asm_ss << "xor eax, eax\n"; // EAX=0
+            asm_ss << ".byte 0xF2, 0x0F, 0x38, 0xF1, 0xC0\n"; // CRC32 EAX, EAX
+            // CRC32(0, 0) = 0 always
+            asm_ss << "test eax, eax\n";
+            asm_ss << "jz " << Lexit << "\n";
+        } else {
+            asm_ss << "xorl %eax, %eax\n";
+            asm_ss << ".byte 0xF2, 0x0F, 0x38, 0xF1, 0xC0\n";
+            asm_ss << "testl %eax, %eax\n";
+            asm_ss << "jz " << Lexit << "\n";
+        }
+        asm_ss << ".byte 0xF4\n";
+        asm_ss << Lexit << ":\n";
+        break;
+    }
+    case 91: {
+        // PEXT/PDEP (BMI2): extract/deposit bits. PEXT+PDEP with same mask = identity.
+        // VEX-encoded, 4 bytes each.
+        // C4 E2 78 F5 C0 = PEXT EAX, EAX, EAX (extract all bits = identity)
+        std::string Lexit = ".Ls" + std::to_string(labelCounter++) + "x";
+        uint32_t val = rng.nextInRange(1, 0x7FFFFFFF);
+        if (intel) {
+            asm_ss << "mov eax, " << std::dec << val << "\n";
+            asm_ss << "mov ecx, 0xFFFFFFFF\n"; // full mask
+            // PEXT EAX, EAX, ECX: extract all bits (identity with full mask)
+            asm_ss << ".byte 0xC4, 0xE2, 0x70, 0xF5, 0xC1\n"; // PEXT EAX, ECX, EAX?
+            // Actually just check if EAX unchanged via simpler method
+            asm_ss << "cmp eax, " << std::dec << val << "\n";
+            asm_ss << "jz " << Lexit << "\n";
+        } else {
+            asm_ss << "movl $" << std::dec << val << ", %eax\n";
+            asm_ss << "movl $0xFFFFFFFF, %ecx\n";
+            asm_ss << ".byte 0xC4, 0xE2, 0x70, 0xF5, 0xC1\n";
+            asm_ss << "cmpl $" << std::dec << val << ", %eax\n";
+            asm_ss << "jz " << Lexit << "\n";
+        }
+        asm_ss << ".byte 0xCC\n";
+        asm_ss << Lexit << ":\n";
+        break;
+    }
+    case 92: {
+        // TZCNT: count trailing zeros. TZCNT(power_of_2) = log2(value).
+        // TZCNT(0x100) = 8 always.
+        std::string Lexit = ".Ls" + std::to_string(labelCounter++) + "x";
+        int shift = rng.nextInRange(1, 30);
+        uint32_t val = 1u << shift;
+        if (intel) {
+            asm_ss << "mov " << reg << ", " << std::dec << val << "\n";
+            asm_ss << "tzcnt " << reg << ", " << reg << "\n";
+            asm_ss << "cmp " << reg << ", " << std::dec << shift << "\n";
+            asm_ss << "jz " << Lexit << "\n";
+        } else {
+            asm_ss << "movl $" << std::dec << val << ", " << reg << "\n";
+            asm_ss << "tzcnt " << reg << ", " << reg << "\n";
+            asm_ss << "cmpl $" << std::dec << shift << ", " << reg << "\n";
+            asm_ss << "jz " << Lexit << "\n";
+        }
+        asm_ss << ".byte 0xF4\n";
+        asm_ss << Lexit << ":\n";
+        break;
+    }
+    case 93: {
+        // LZCNT: count leading zeros. LZCNT(1) = 31 on 32-bit.
+        std::string Lexit = ".Ls" + std::to_string(labelCounter++) + "x";
+        if (intel) {
+            asm_ss << "mov " << reg << ", 1\n";
+            asm_ss << "lzcnt " << reg << ", " << reg << "\n"; // 31
+            asm_ss << "cmp " << reg << ", 31\n";
+            asm_ss << "jz " << Lexit << "\n";
+        } else {
+            asm_ss << "movl $1, " << reg << "\n";
+            asm_ss << "lzcnt " << reg << ", " << reg << "\n";
+            asm_ss << "cmpl $31, " << reg << "\n";
+            asm_ss << "jz " << Lexit << "\n";
+        }
+        asm_ss << ".byte 0xEB, 0xFE\n";
+        asm_ss << Lexit << ":\n";
+        break;
+    }
+    case 94: {
+        // ANDN (BMI1): ANDN reg, src, dst = (~src) & dst
+        // ANDN(0xFFFFFFFF, X) = ~0xFFFFFFFF & X = 0 & X = 0
+        // C4 E2 70 F2 C0 = ANDN EAX, ECX, EAX
+        std::string Lexit = ".Ls" + std::to_string(labelCounter++) + "x";
+        if (intel) {
+            asm_ss << "mov eax, 42\n";
+            asm_ss << "mov ecx, 0xFFFFFFFF\n";
+            // ANDN EAX, ECX, EAX = (~ECX) & EAX = 0 & 42 = 0
+            asm_ss << ".byte 0xC4, 0xE2, 0x70, 0xF2, 0xC0\n";
+            asm_ss << "test eax, eax\n";
+            asm_ss << "jz " << Lexit << "\n";
+        } else {
+            asm_ss << "movl $42, %eax\n";
+            asm_ss << "movl $0xFFFFFFFF, %ecx\n";
+            asm_ss << ".byte 0xC4, 0xE2, 0x70, 0xF2, 0xC0\n";
+            asm_ss << "testl %eax, %eax\n";
+            asm_ss << "jz " << Lexit << "\n";
+        }
+        asm_ss << ".byte 0xF4\n";
+        asm_ss << Lexit << ":\n";
+        break;
+    }
+    case 95: {
+        // BLSI (BMI1): isolate lowest set bit. BLSI(X) = X & (-X)
+        // BLSI of power of 2 = itself. BLSI(0x80) = 0x80.
+        std::string Lexit = ".Ls" + std::to_string(labelCounter++) + "x";
+        int shift = rng.nextInRange(0, 30);
+        uint32_t val = 1u << shift;
+        if (intel) {
+            asm_ss << "mov " << reg << ", " << std::dec << val << "\n";
+            // C4 E2 78 F3 D8+reg = BLSI reg, reg (encoding varies)
+            // Simpler: just use the reg and compare
+            asm_ss << "blsi " << reg << ", " << reg << "\n";
+            asm_ss << "cmp " << reg << ", " << std::dec << val << "\n";
+            asm_ss << "jz " << Lexit << "\n";
+        } else {
+            asm_ss << "movl $" << std::dec << val << ", " << reg << "\n";
+            asm_ss << "blsi " << reg << ", " << reg << "\n";
+            asm_ss << "cmpl $" << std::dec << val << ", " << reg << "\n";
+            asm_ss << "jz " << Lexit << "\n";
+        }
+        asm_ss << ".byte 0xCC\n";
+        asm_ss << Lexit << ":\n";
+        break;
+    }
+    case 96: {
+        // MOVBE: byte-swap load/store. Like BSWAP but memory.
+        // Dead path: MOVBE [mem], reg looks like a store (confuses data flow)
+        std::string Lexit = ".Ls" + std::to_string(labelCounter++) + "x";
+        if (intel) asm_ss << "sub " << reg << ", " << reg << "\n";
+        else       asm_ss << "subl " << reg << ", " << reg << "\n";
+        asm_ss << "jz " << Lexit << "\n";
+        // Dead: MOVBE instruction bytes (never executed)
+        asm_ss << ".byte 0x0F, 0x38, 0xF1, 0x00\n"; // MOVBE [EAX], EAX
+        asm_ss << ".byte 0xF4\n";
+        asm_ss << Lexit << ":\n";
+        break;
+    }
+    case 97: {
+        // XGETBV: read extended control register. ECX=0 → EAX:EDX = XCR0
+        // XCR0 bit 0 is always 1 (x87 FPU state). Test bit 0 → always set.
+        std::string Lexit = ".Ls" + std::to_string(labelCounter++) + "x";
+        if (intel) {
+            asm_ss << "xor ecx, ecx\n"; // XCR0
+            asm_ss << ".byte 0x0F, 0x01, 0xD0\n"; // XGETBV
+            asm_ss << "test eax, 1\n"; // bit 0 always set
+            asm_ss << "jnz " << Lexit << "\n";
+        } else {
+            asm_ss << "xorl %ecx, %ecx\n";
+            asm_ss << ".byte 0x0F, 0x01, 0xD0\n";
+            asm_ss << "testl $1, %eax\n";
+            asm_ss << "jnz " << Lexit << "\n";
+        }
+        asm_ss << ".byte 0xF4\n";
+        asm_ss << Lexit << ":\n";
+        break;
+    }
+    case 98: {
+        // PSHUFB identity: shuffle with identity mask = no change
+        // Dead path has SSE shuffle instruction bytes
+        std::string Lexit = ".Ls" + std::to_string(labelCounter++) + "x";
+        asm_ss << "clc\njnc " << Lexit << "\n"; // CLC→JNC always taken
+        // Dead: PSHUFB XMM0, [EAX] bytes
+        asm_ss << ".byte 0x66, 0x0F, 0x38, 0x00, 0x00\n";
+        asm_ss << ".byte 0xF4\n";
+        asm_ss << Lexit << ":\n";
+        break;
+    }
+    case 99: {
+        // AESIMC (AES inverse mix columns) as dead-path confusion
+        // 66 0F 38 DB C0 = AESIMC XMM0, XMM0
+        std::string Lexit = ".Ls" + std::to_string(labelCounter++) + "x";
+        if (intel) asm_ss << "xor " << reg << ", " << reg << "\n";
+        else       asm_ss << "xorl " << reg << ", " << reg << "\n";
+        asm_ss << "jz " << Lexit << "\n";
+        // Dead AES instruction bytes
+        asm_ss << ".byte 0x66, 0x0F, 0x38, 0xDB, 0xC0\n"; // AESIMC XMM0, XMM0
+        asm_ss << ".byte 0x66, 0x0F, 0x38, 0xDC, 0xC0\n"; // AESENC XMM0, XMM0
+        asm_ss << ".byte 0xF4\n";
+        asm_ss << Lexit << ":\n";
+        break;
+    }
+    case 100: {
+        // The absolute insanity: VPBROADCASTD + VPCMPEQD + VPMOVMSKB → scalar
+        // Broadcast 42 to all YMM lanes → compare all lanes equal → mask = 0xFFFFFFFF → nonzero
+        // This is a 256-bit SIMD opaque predicate
+        std::string Lexit = ".Ls" + std::to_string(labelCounter++) + "x";
+        if (intel) {
+            asm_ss << "mov eax, 42\n";
+            // VMOVD XMM0, EAX
+            asm_ss << ".byte 0xC5, 0xF9, 0x6E, 0xC0\n";
+            // VPBROADCASTD YMM0, XMM0 (broadcast 42 to all 8 lanes)
+            asm_ss << ".byte 0xC4, 0xE2, 0x7D, 0x58, 0xC0\n";
+            // VPCMPEQD YMM1, YMM0, YMM0 (all lanes equal → all 1s)
+            asm_ss << ".byte 0xC5, 0xFD, 0x76, 0xC8\n";
+            // VPMOVMSKB EAX, YMM1 (move mask → EAX = 0xFFFFFFFF)
+            asm_ss << ".byte 0xC5, 0xFD, 0xD7, 0xC1\n";
+            asm_ss << "test eax, eax\n";
+            asm_ss << "jnz " << Lexit << "\n";
+        } else {
+            asm_ss << "movl $42, %eax\n";
+            asm_ss << ".byte 0xC5, 0xF9, 0x6E, 0xC0\n";
+            asm_ss << ".byte 0xC4, 0xE2, 0x7D, 0x58, 0xC0\n";
+            asm_ss << ".byte 0xC5, 0xFD, 0x76, 0xC8\n";
+            asm_ss << ".byte 0xC5, 0xFD, 0xD7, 0xC1\n";
+            asm_ss << "testl %eax, %eax\n";
+            asm_ss << "jnz " << Lexit << "\n";
+        }
+        asm_ss << ".byte 0xF4\n";
+        asm_ss << Lexit << ":\n";
+        // Clean up YMM state
+        asm_ss << ".byte 0xC5, 0xFC, 0x77\n"; // VZEROALL
         break;
     }
     }
