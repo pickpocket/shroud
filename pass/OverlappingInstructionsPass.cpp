@@ -23,6 +23,13 @@ static const char* gpr32_att[] = {
 };
 static constexpr int NUM_GPR32 = 6;
 
+static const char* gpr64_intel[] = {
+    "rax", "rbx", "rcx", "rdx", "rsi", "rdi"
+};
+static const char* gpr64_att[] = {
+    "%rax", "%rbx", "%rcx", "%rdx", "%rsi", "%rdi"
+};
+
 static const char* clobberNames[] = {
     "eax", "ebx", "ecx", "edx", "esi", "edi"
 };
@@ -88,16 +95,19 @@ generateDynamicPattern(ObfRNG &rng, bool intel) {
     int regIdx = rng.nextInRange(0, NUM_GPR32 - 1);
     const char *reg = intel ? gpr32_intel[regIdx] : gpr32_att[regIdx];
     const char *clobber = clobberNames[regIdx];
+    const char *reg64 = intel ? gpr64_intel[regIdx] : gpr64_att[regIdx];
 
     int strategy;
     int roll = rng.nextInRange(0, 99);
-    if (roll < 20)
+    if (roll < 15)
+        strategy = 40 + rng.nextInRange(0, 5);  // RET-based NOP jump (40-45)
+    else if (roll < 30)
         strategy = 35 + rng.nextInRange(0, 4);  // 15-byte NOP control flow (35-39)
-    else if (roll < 40)
+    else if (roll < 45)
         strategy = 23 + rng.nextInRange(0, 11); // 15-byte NOP opaque + delayed traps (23-34)
-    else if (roll < 55)
+    else if (roll < 60)
         strategy = 15 + rng.nextInRange(0, 7);  // 8-byte NOP control flow (15-22)
-    else if (roll < 70)
+    else if (roll < 75)
         strategy = 10 + rng.nextInRange(0, 4);  // NOP overlap (10-14)
     else
         strategy = rng.nextInRange(0, 9);        // standard (0-9)
@@ -742,9 +752,149 @@ generateDynamicPattern(ObfRNG &rng, bool intel) {
         asm_ss << Lexit << ":\n";
         break;
     }
+
+    // ================================================================
+    // RET-BASED NOP JUMPS (strategies 40-45)
+    //
+    // Push the address of the NOP displacement onto the stack, then RET.
+    // RET pops the address and jumps to it. Disassemblers treat RET as
+    // a function return, not a branch — they never follow where it goes.
+    // The call stack becomes meaningless (RET without matching CALL).
+    //
+    // Construction:
+    //   lea reg, [rip + offset_to_displacement]
+    //   push reg
+    //   ret              ← jumps to NOP displacement
+    //   .byte NOP header ← dead, never executed
+    //   displacement:    ← execution lands here via RET
+    //   jmp exit
+    // ================================================================
+
+    case 40: {
+        // CALL+ADD+RET into 8-byte NOP displacement
+        // CALL pushes return addr, target adjusts it to point into NOP disp, RET goes there
+        std::string Lexit = ".Ls" + std::to_string(labelCounter++) + "x";
+        std::string Ladj = ".Ls" + std::to_string(labelCounter++) + "j";
+        uint8_t nopOp = 0x19 + rng.nextInRange(0, 6);
+        asm_ss << "call " << Ladj << "\n";
+        // Dead: NOP header (CALL skipped past this to Ladj)
+        asm_ss << ".byte 0x0F, 0x" << std::hex << (int)nopOp << ", 0x84, 0x00\n";
+        asm_ss << L1 << ":\n"; // NOP displacement — RET target
+        asm_ss << "jmp " << Lexit << "\n";
+        asm_ss << ".byte 0x" << std::hex << rng.nextInRange(0,255) << ", 0x" << std::hex << rng.nextInRange(0,255) << "\n";
+        asm_ss << Ladj << ":\n";
+        // Adjust return addr on stack: [rsp] currently points after the CALL.
+        // We want it to point to L1 instead. Use: add [rsp], (L1 - after_call)
+        // Since L1 is after the NOP header, offset = size of NOP header (4 bytes)
+        if (intel) asm_ss << "add qword ptr [rsp], 4\n";
+        else       asm_ss << "addq $4, (%rsp)\n";
+        asm_ss << "ret\n"; // pops adjusted addr, jumps to L1
+        asm_ss << Lexit << ":\n";
+        break;
+    }
+    case 41: {
+        // CALL+ADD+RET into 15-byte NOP displacement
+        std::string Lexit = ".Ls" + std::to_string(labelCounter++) + "x";
+        std::string Ladj = ".Ls" + std::to_string(labelCounter++) + "j";
+        uint8_t nopOp = 0x19 + rng.nextInRange(0, 6);
+        asm_ss << "call " << Ladj << "\n";
+        asm_ss << ".byte 0x66, 0x66, 0x66, 0x66, 0x66, 0x66, 0x66\n";
+        asm_ss << ".byte 0x0F, 0x" << std::hex << (int)nopOp << ", 0x84, 0x00\n";
+        asm_ss << L1 << ":\n";
+        asm_ss << "jmp " << Lexit << "\n";
+        asm_ss << ".byte 0x" << std::hex << rng.nextInRange(0,255) << ", 0x" << std::hex << rng.nextInRange(0,255) << "\n";
+        asm_ss << Ladj << ":\n";
+        // NOP header is 11 bytes (7 prefixes + 4 opcode/modrm/sib)
+        if (intel) asm_ss << "add qword ptr [rsp], 11\n";
+        else       asm_ss << "addq $11, (%rsp)\n";
+        asm_ss << "ret\n";
+        asm_ss << Lexit << ":\n";
+        break;
+    }
+    case 42: {
+        // CALL+ADD+RET with random offset adjustment (harder to pattern match)
+        std::string Lexit = ".Ls" + std::to_string(labelCounter++) + "x";
+        std::string Ladj = ".Ls" + std::to_string(labelCounter++) + "j";
+        uint8_t nopOp = 0x19 + rng.nextInRange(0, 6);
+        // Use assembler-computed offset so it's always correct
+        asm_ss << "call " << Ladj << "\n";
+        asm_ss << ".byte 0x0F, 0x" << std::hex << (int)nopOp << ", 0x84, 0x00\n";
+        asm_ss << L1 << ":\n";
+        asm_ss << "jmp " << Lexit << "\n";
+        asm_ss << ".byte 0x" << std::hex << rng.nextInRange(0,255) << "\n";
+        asm_ss << Ladj << ":\n";
+        if (intel) asm_ss << "add qword ptr [rsp], 4\n";
+        else       asm_ss << "addq $4, (%rsp)\n";
+        asm_ss << "ret\n";
+        asm_ss << Lexit << ":\n";
+        break;
+    }
+    case 43: {
+        // Double CALL+RET chain through two NOP displacements
+        std::string Lmid = ".Ls" + std::to_string(labelCounter++) + "m";
+        std::string Lexit = ".Ls" + std::to_string(labelCounter++) + "x";
+        std::string Ladj1 = ".Ls" + std::to_string(labelCounter++) + "j";
+        std::string Ladj2 = ".Ls" + std::to_string(labelCounter++) + "j";
+        uint8_t op1 = 0x19 + rng.nextInRange(0, 6);
+        uint8_t op2 = 0x19 + rng.nextInRange(0, 6);
+        // First CALL+RET
+        asm_ss << "call " << Ladj1 << "\n";
+        asm_ss << ".byte 0x0F, 0x" << std::hex << (int)op1 << ", 0x84, 0x00\n";
+        asm_ss << L1 << ":\n";
+        // Second CALL+RET
+        asm_ss << "call " << Ladj2 << "\n";
+        asm_ss << ".byte 0x0F, 0x" << std::hex << (int)op2 << ", 0x84, 0x00\n";
+        asm_ss << Lmid << ":\n";
+        asm_ss << "jmp " << Lexit << "\n";
+        asm_ss << ".byte 0x" << std::hex << rng.nextInRange(0,255) << "\n";
+        // Adjustment routines
+        asm_ss << Ladj1 << ":\n";
+        if (intel) asm_ss << "add qword ptr [rsp], 4\n";
+        else       asm_ss << "addq $4, (%rsp)\n";
+        asm_ss << "ret\n";
+        asm_ss << Ladj2 << ":\n";
+        if (intel) asm_ss << "add qword ptr [rsp], 4\n";
+        else       asm_ss << "addq $4, (%rsp)\n";
+        asm_ss << "ret\n";
+        asm_ss << Lexit << ":\n";
+        break;
+    }
+    case 44: {
+        // CALL+RET with HLT trap on dead path
+        std::string Lexit = ".Ls" + std::to_string(labelCounter++) + "x";
+        std::string Ladj = ".Ls" + std::to_string(labelCounter++) + "j";
+        uint8_t nopOp = 0x19 + rng.nextInRange(0, 6);
+        asm_ss << "call " << Ladj << "\n";
+        asm_ss << ".byte 0x0F, 0x" << std::hex << (int)nopOp << ", 0x84, 0x00\n";
+        asm_ss << ".byte 0xF4\n"; // HLT trap (dead)
+        asm_ss << L1 << ":\n";
+        asm_ss << "jmp " << Lexit << "\n";
+        asm_ss << Ladj << ":\n";
+        if (intel) asm_ss << "add qword ptr [rsp], 5\n"; // 4 NOP header + 1 HLT
+        else       asm_ss << "addq $5, (%rsp)\n";
+        asm_ss << "ret\n";
+        asm_ss << Lexit << ":\n";
+        break;
+    }
+    case 45: {
+        std::string Lexit = ".Ls" + std::to_string(labelCounter++) + "x";
+        std::string Ladj = ".Ls" + std::to_string(labelCounter++) + "j";
+        asm_ss << "call " << Ladj << "\n";
+        asm_ss << ".byte 0xF3, 0x0F, 0x1E, 0xFA\n"; // ENDBR64 (dead)
+        asm_ss << ".byte 0xE8\n"; // rogue CALL byte (dead)
+        asm_ss << L1 << ":\n";
+        asm_ss << "jmp " << Lexit << "\n";
+        asm_ss << ".byte 0x" << std::hex << rng.nextInRange(0,255) << ", 0x" << std::hex << rng.nextInRange(0,255) << "\n";
+        asm_ss << Ladj << ":\n";
+        if (intel) asm_ss << "add qword ptr [rsp], 5\n"; // 4 ENDBR64 + 1 rogue E8
+        else       asm_ss << "addq $5, (%rsp)\n";
+        asm_ss << "ret\n";
+        asm_ss << Lexit << ":\n";
+        break;
+    }
     }
 
-    clob_ss << "~{" << clobber << "},~{cc},~{dirflag},~{fpsr},~{flags}";
+    clob_ss << "~{" << clobber << "},~{cc},~{dirflag},~{fpsr},~{flags},~{memory}";
 
     return { asm_ss.str(), clob_ss.str() };
 }
