@@ -1,0 +1,56 @@
+{
+  "experiment": "Ghidra Headless Analysis",
+  "tool": "Ghidra 11.3.1 headless with DecompInterface",
+  "benchmarks": {
+    "crackme_plain": {
+      "functions": 437,
+      "decompile_ok": 437,
+      "decompile_fail": 0,
+      "main_decompile": "N/A (name mangled)"
+    },
+    "crackme_obf": {
+      "functions": 434,
+      "decompile_ok": 433,
+      "decompile_fail": 1,
+      "main_at_0x140001000": {
+        "size": "189795 bytes",
+        "decompile": "FAILED"
+      }
+    },
+    "sort_plain": {
+      "functions": 451,
+      "decompile_ok": 451,
+      "decompile_fail": 0
+    },
+    "sort_obf": {
+      "functions": 441,
+      "decompile_ok": 440,
+      "decompile_fail": 1,
+      "main_at_0x140001000": {
+        "size_ghidra_sees": "117 bytes",
+        "real_size": "5.3MB",
+        "decompile": "FAILED"
+      }
+    },
+    "rc4_plain": {
+      "functions": 448,
+      "decompile_ok": 448,
+      "decompile_fail": 0
+    },
+    "rc4_obf": {
+      "functions": 439,
+      "decompile_ok": 438,
+      "decompile_fail": 1,
+      "main_at_0x140001000": {
+        "size_ghidra_sees": "74 bytes",
+        "real_size": "2.4MB",
+        "decompile": "FAILED"
+      }
+    }
+  },
+  "summary": {
+    "plain_main_decompile": "3/3 SUCCESS (all CRT + user functions decompile)",
+    "obf_main_decompile": "0/3 FAILED (Ghidra can't even determine function boundaries)",
+    "function_boundary_broken": "Ghidra sees main as 74-117 bytes instead of the real 2.4-5.3MB"
+  }
+}
