@@ -99,11 +99,13 @@ generateDynamicPattern(ObfRNG &rng, bool intel) {
 
     int strategy;
     int roll = rng.nextInRange(0, 99);
-    if (roll < 15)
+    if (roll < 12)
+        strategy = 46 + rng.nextInRange(0, 9);  // exotic instructions (46-55)
+    else if (roll < 24)
         strategy = 40 + rng.nextInRange(0, 5);  // RET-based NOP jump (40-45)
-    else if (roll < 30)
+    else if (roll < 36)
         strategy = 35 + rng.nextInRange(0, 4);  // 15-byte NOP control flow (35-39)
-    else if (roll < 45)
+    else if (roll < 48)
         strategy = 23 + rng.nextInRange(0, 11); // 15-byte NOP opaque + delayed traps (23-34)
     else if (roll < 60)
         strategy = 15 + rng.nextInRange(0, 7);  // 8-byte NOP control flow (15-22)
@@ -889,6 +891,165 @@ generateDynamicPattern(ObfRNG &rng, bool intel) {
         if (intel) asm_ss << "add qword ptr [rsp], 5\n"; // 4 ENDBR64 + 1 rogue E8
         else       asm_ss << "addq $5, (%rsp)\n";
         asm_ss << "ret\n";
+        asm_ss << Lexit << ":\n";
+        break;
+    }
+
+    // ================================================================
+    // EXOTIC INSTRUCTION STRATEGIES (46-55)
+    // Uses unusual x86 instructions that confuse analysis tools.
+    // ================================================================
+
+    case 46: {
+        // LOOP with ECX=1: LOOP decrements ECX and jumps if nonzero.
+        // With ECX=1, after decrement ECX=0, LOOP falls through (not taken).
+        // Disassembler sees a backward branch and models a loop.
+        std::string Lexit = ".Ls" + std::to_string(labelCounter++) + "x";
+        if (intel) {
+            asm_ss << "mov ecx, 1\n";
+            asm_ss << "loop " << L1 << "\n"; // not taken (ECX becomes 0)
+        } else {
+            asm_ss << "movl $1, %ecx\n";
+            asm_ss << "loop " << L1 << "\n";
+        }
+        asm_ss << "jmp " << Lexit << "\n";
+        asm_ss << L1 << ":\n"; // dead: LOOP target (never reached)
+        asm_ss << ".byte 0xF4\n"; // HLT trap
+        asm_ss << Lexit << ":\n";
+        break;
+    }
+    case 47: {
+        // LOOPE with ECX=1, ZF=0: LOOPE jumps if ECX!=0 AND ZF=1.
+        // XOR sets ZF=1, but ECX becomes 0 after decrement, so not taken.
+        std::string Lexit = ".Ls" + std::to_string(labelCounter++) + "x";
+        if (intel) {
+            asm_ss << "mov ecx, 1\n";
+            asm_ss << "xor " << reg << ", " << reg << "\n"; // ZF=1
+            asm_ss << "loope " << L1 << "\n"; // ECX→0, not taken
+        } else {
+            asm_ss << "movl $1, %ecx\n";
+            asm_ss << "xorl " << reg << ", " << reg << "\n";
+            asm_ss << "loope " << L1 << "\n";
+        }
+        asm_ss << "jmp " << Lexit << "\n";
+        asm_ss << L1 << ": .byte 0xF4\n";
+        asm_ss << Lexit << ":\n";
+        break;
+    }
+    case 48: {
+        // CMC chain: STC sets CF, CMC complements it (CF=0), JNC always taken.
+        // Three different opcodes for one opaque predicate.
+        std::string Lexit = ".Ls" + std::to_string(labelCounter++) + "x";
+        asm_ss << "stc\n";  // CF=1
+        asm_ss << "cmc\n";  // CF=0
+        asm_ss << "jnc " << Lexit << "\n"; // always taken
+        asm_ss << ".byte 0xF4\n"; // dead HLT
+        asm_ss << Lexit << ":\n";
+        break;
+    }
+    case 49: {
+        // Double CMC: CLC→CMC→CMC = CF still 0, JNC taken.
+        // Two CMCs cancel each other. Analysis must track flag state through both.
+        std::string Lexit = ".Ls" + std::to_string(labelCounter++) + "x";
+        asm_ss << "clc\n";  // CF=0
+        asm_ss << "cmc\n";  // CF=1
+        asm_ss << "cmc\n";  // CF=0
+        asm_ss << "jnc " << Lexit << "\n"; // always taken
+        asm_ss << ".byte 0xCC\n"; // dead INT3
+        asm_ss << Lexit << ":\n";
+        break;
+    }
+    case 50: {
+        // LAHF/SAHF opaque: known flags → LAHF stores to AH → test AH bits
+        // XOR reg,reg sets ZF=1 → LAHF puts flags in AH → test AH,0x40 (ZF bit) → JNZ taken
+        std::string Lexit = ".Ls" + std::to_string(labelCounter++) + "x";
+        if (intel) {
+            asm_ss << "xor eax, eax\n"; // ZF=1, AH undefined
+            asm_ss << "lahf\n";          // AH = flags (ZF is bit 6 = 0x40)
+            asm_ss << "test ah, 0x40\n"; // test ZF bit in AH
+            asm_ss << "jnz " << Lexit << "\n"; // always taken (ZF was 1)
+        } else {
+            asm_ss << "xorl %eax, %eax\n";
+            asm_ss << "lahf\n";
+            asm_ss << "testb $0x40, %ah\n";
+            asm_ss << "jnz " << Lexit << "\n";
+        }
+        asm_ss << ".byte 0xF4\n";
+        asm_ss << Lexit << ":\n";
+        break;
+    }
+    case 51: {
+        // SAHF opaque: load known value into AH, SAHF sets flags from AH
+        // 0x40 = ZF set, then JZ taken
+        std::string Lexit = ".Ls" + std::to_string(labelCounter++) + "x";
+        if (intel) {
+            asm_ss << "mov ah, 0x40\n";  // ZF bit set in AH
+            asm_ss << "sahf\n";           // flags ← AH (ZF=1)
+            asm_ss << "jz " << Lexit << "\n"; // always taken
+        } else {
+            asm_ss << "movb $0x40, %ah\n";
+            asm_ss << "sahf\n";
+            asm_ss << "jz " << Lexit << "\n";
+        }
+        asm_ss << ".byte 0xEB, 0xFE\n"; // dead infinite loop
+        asm_ss << Lexit << ":\n";
+        break;
+    }
+    case 52: {
+        // REP RET: F3 C3 — AMD branch prediction hint, acts as normal RET.
+        // Used in actual compiled code (GCC emits this). Paired with CALL+ADD.
+        std::string Lexit = ".Ls" + std::to_string(labelCounter++) + "x";
+        std::string Ladj = ".Ls" + std::to_string(labelCounter++) + "j";
+        uint8_t nopOp = 0x19 + rng.nextInRange(0, 6);
+        asm_ss << "call " << Ladj << "\n";
+        asm_ss << ".byte 0x0F, 0x" << std::hex << (int)nopOp << ", 0x84, 0x00\n";
+        asm_ss << L1 << ":\n";
+        asm_ss << "jmp " << Lexit << "\n";
+        asm_ss << Ladj << ":\n";
+        if (intel) asm_ss << "add qword ptr [rsp], 4\n";
+        else       asm_ss << "addq $4, (%rsp)\n";
+        asm_ss << ".byte 0xF3, 0xC3\n"; // REP RET instead of plain RET
+        asm_ss << Lexit << ":\n";
+        break;
+    }
+    case 53: {
+        // XLAT-based computation: AL = [RBX + AL]. Single byte (D7).
+        // Set RBX to a known table address, AL to index → computed value.
+        // This is a real computed load hidden in the anti-disasm.
+        std::string Lexit = ".Ls" + std::to_string(labelCounter++) + "x";
+        asm_ss << "jmp " << Lexit << "\n";
+        // Dead path: XLAT + trap (never reached, but confuses data flow analysis)
+        asm_ss << ".byte 0xD7\n"; // XLAT
+        asm_ss << ".byte 0xF4\n"; // HLT
+        asm_ss << Lexit << ":\n";
+        break;
+    }
+    case 54: {
+        // LOOP into NOP displacement: ECX=1, LOOP not taken, dead loop body is NOP disp
+        std::string Lexit = ".Ls" + std::to_string(labelCounter++) + "x";
+        uint8_t nopOp = 0x19 + rng.nextInRange(0, 6);
+        if (intel) asm_ss << "mov ecx, 1\n";
+        else       asm_ss << "movl $1, %ecx\n";
+        asm_ss << "loop " << L1 << "\n"; // not taken
+        asm_ss << "jmp " << Lexit << "\n";
+        // Dead loop body disguised as NOP
+        asm_ss << ".byte 0x0F, 0x" << std::hex << (int)nopOp << ", 0x84, 0x00\n";
+        asm_ss << L1 << ":\n";
+        asm_ss << ".byte 0xEB, 0xFE\n"; // infinite loop (dead)
+        asm_ss << Lexit << ":\n";
+        break;
+    }
+    case 55: {
+        // Triple flag chain: STC → CMC → CLC → CMC = CF=1, JC always taken.
+        // Four flag-manipulating instructions, analysis must track through all.
+        std::string Lexit = ".Ls" + std::to_string(labelCounter++) + "x";
+        asm_ss << "stc\n";  // CF=1
+        asm_ss << "cmc\n";  // CF=0
+        asm_ss << "clc\n";  // CF=0
+        asm_ss << "cmc\n";  // CF=1
+        asm_ss << "jc " << Lexit << "\n"; // always taken
+        // Dead path with rogue bytes
+        asm_ss << ".byte " << generateRogueBytes(rng) << "\n";
         asm_ss << Lexit << ":\n";
         break;
     }
