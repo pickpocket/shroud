@@ -100,7 +100,7 @@ generateDynamicPattern(ObfRNG &rng, bool intel) {
     int strategy;
     int roll = rng.nextInRange(0, 99);
     if (roll < 12)
-        strategy = 46 + rng.nextInRange(0, 9);  // exotic instructions (46-55)
+        strategy = 46 + rng.nextInRange(0, 19); // exotic instructions (46-65)
     else if (roll < 24)
         strategy = 40 + rng.nextInRange(0, 5);  // RET-based NOP jump (40-45)
     else if (roll < 36)
@@ -1050,6 +1050,191 @@ generateDynamicPattern(ObfRNG &rng, bool intel) {
         asm_ss << "jc " << Lexit << "\n"; // always taken
         // Dead path with rogue bytes
         asm_ss << ".byte " << generateRogueBytes(rng) << "\n";
+        asm_ss << Lexit << ":\n";
+        break;
+    }
+    case 56: {
+        // BT (bit test): known value → BT bit 0 → CF = known → JC/JNC
+        std::string Lexit = ".Ls" + std::to_string(labelCounter++) + "x";
+        if (intel) {
+            asm_ss << "mov " << reg << ", 1\n"; // bit 0 = 1
+            asm_ss << "bt " << reg << ", 0\n";  // CF = bit 0 = 1
+            asm_ss << "jc " << Lexit << "\n";   // always taken
+        } else {
+            asm_ss << "movl $1, " << reg << "\n";
+            asm_ss << "bt $0, " << reg << "\n";
+            asm_ss << "jc " << Lexit << "\n";
+        }
+        asm_ss << ".byte 0xF4\n";
+        asm_ss << Lexit << ":\n";
+        break;
+    }
+    case 57: {
+        // BSF: bit scan forward on known nonzero value → ZF=0 always
+        std::string Lexit = ".Ls" + std::to_string(labelCounter++) + "x";
+        uint32_t val = rng.nextInRange(1, 0x7FFFFFFF);
+        if (intel) {
+            asm_ss << "mov " << reg << ", " << std::dec << val << "\n";
+            asm_ss << "bsf " << reg << ", " << reg << "\n"; // ZF=0 (nonzero input)
+            asm_ss << "jnz " << Lexit << "\n"; // always taken
+        } else {
+            asm_ss << "movl $" << std::dec << val << ", " << reg << "\n";
+            asm_ss << "bsfl " << reg << ", " << reg << "\n";
+            asm_ss << "jnz " << Lexit << "\n";
+        }
+        asm_ss << ".byte 0xCC\n";
+        asm_ss << Lexit << ":\n";
+        break;
+    }
+    case 58: {
+        // BSWAP twice = identity. BSWAP+BSWAP+CMP with original = equal → JZ taken
+        std::string Lexit = ".Ls" + std::to_string(labelCounter++) + "x";
+        uint32_t val = rng.next32();
+        if (intel) {
+            asm_ss << "mov " << reg << ", " << std::dec << val << "\n";
+            asm_ss << "bswap " << reg << "\n";   // reverse bytes
+            asm_ss << "bswap " << reg << "\n";   // reverse again = original
+            asm_ss << "cmp " << reg << ", " << std::dec << val << "\n";
+            asm_ss << "jz " << Lexit << "\n";    // always taken
+        } else {
+            asm_ss << "movl $" << std::dec << val << ", " << reg << "\n";
+            asm_ss << "bswap " << reg << "\n";
+            asm_ss << "bswap " << reg << "\n";
+            asm_ss << "cmpl $" << std::dec << val << ", " << reg << "\n";
+            asm_ss << "jz " << Lexit << "\n";
+        }
+        asm_ss << ".byte 0xF4\n";
+        asm_ss << Lexit << ":\n";
+        break;
+    }
+    case 59: {
+        // CDQ sign-extend: XOR EAX,EAX → CDQ zeros EDX → TEST EDX,EDX → JZ taken
+        std::string Lexit = ".Ls" + std::to_string(labelCounter++) + "x";
+        if (intel) {
+            asm_ss << "xor eax, eax\n"; // EAX=0
+            asm_ss << "cdq\n";           // EDX = sign-extend(EAX) = 0
+            asm_ss << "test edx, edx\n"; // ZF=1
+            asm_ss << "jz " << Lexit << "\n";
+        } else {
+            asm_ss << "xorl %eax, %eax\n";
+            asm_ss << "cdq\n";
+            asm_ss << "testl %edx, %edx\n";
+            asm_ss << "jz " << Lexit << "\n";
+        }
+        asm_ss << ".byte 0xEB, 0xFE\n";
+        asm_ss << Lexit << ":\n";
+        break;
+    }
+    case 60: {
+        // PUSHF/POPF: save flags, trash them, restore → flags unchanged
+        // XOR sets ZF=1, PUSHF saves, STC trashes CF, POPF restores ZF=1, JZ taken
+        std::string Lexit = ".Ls" + std::to_string(labelCounter++) + "x";
+        if (intel) asm_ss << "xor " << reg << ", " << reg << "\n"; // ZF=1
+        else       asm_ss << "xorl " << reg << ", " << reg << "\n";
+        asm_ss << "pushfq\n";  // save flags (ZF=1)
+        asm_ss << "stc\n";     // trash CF
+        asm_ss << "cmc\n";     // trash CF more
+        asm_ss << "popfq\n";   // restore flags (ZF=1 again)
+        asm_ss << "jz " << Lexit << "\n"; // always taken (ZF restored)
+        asm_ss << ".byte 0xF4\n";
+        asm_ss << Lexit << ":\n";
+        break;
+    }
+    case 61: {
+        // XCHG twice = identity: XCHG a,b then XCHG a,b → both unchanged
+        std::string Lexit = ".Ls" + std::to_string(labelCounter++) + "x";
+        // Pick a second register different from the first
+        int regIdx2 = (regIdx + 1) % NUM_GPR32;
+        const char *reg2 = intel ? gpr32_intel[regIdx2] : gpr32_att[regIdx2];
+        if (intel) {
+            asm_ss << "xor " << reg << ", " << reg << "\n"; // reg=0
+            asm_ss << "xchg " << reg << ", " << reg2 << "\n"; // swap
+            asm_ss << "xchg " << reg << ", " << reg2 << "\n"; // swap back
+            asm_ss << "test " << reg << ", " << reg << "\n";  // reg still 0, ZF=1
+            asm_ss << "jz " << Lexit << "\n";
+        } else {
+            asm_ss << "xorl " << reg << ", " << reg << "\n";
+            asm_ss << "xchg " << reg << ", " << reg2 << "\n";
+            asm_ss << "xchg " << reg << ", " << reg2 << "\n";
+            asm_ss << "testl " << reg << ", " << reg << "\n";
+            asm_ss << "jz " << Lexit << "\n";
+        }
+        asm_ss << ".byte 0xCC\n";
+        asm_ss << Lexit << ":\n";
+        break;
+    }
+    case 62: {
+        // MOVSX sign-extend: MOV AL,0xFF → MOVSX EAX,AL → EAX=0xFFFFFFFF → always nonzero
+        std::string Lexit = ".Ls" + std::to_string(labelCounter++) + "x";
+        if (intel) {
+            asm_ss << "mov al, 0xFF\n";
+            asm_ss << "movsx eax, al\n"; // EAX = 0xFFFFFFFF
+            asm_ss << "test eax, eax\n"; // nonzero
+            asm_ss << "jnz " << Lexit << "\n";
+        } else {
+            asm_ss << "movb $0xFF, %al\n";
+            asm_ss << "movsbl %al, %eax\n";
+            asm_ss << "testl %eax, %eax\n";
+            asm_ss << "jnz " << Lexit << "\n";
+        }
+        asm_ss << ".byte 0xF4\n";
+        asm_ss << Lexit << ":\n";
+        break;
+    }
+    case 63: {
+        // POPCNT opaque: POPCNT of known value → known count → compare → always true
+        // POPCNT(0x55555555) = 16 always
+        std::string Lexit = ".Ls" + std::to_string(labelCounter++) + "x";
+        if (intel) {
+            asm_ss << "mov " << reg << ", 0x55555555\n";
+            asm_ss << "popcnt " << reg << ", " << reg << "\n"; // reg = 16
+            asm_ss << "cmp " << reg << ", 16\n";
+            asm_ss << "jz " << Lexit << "\n";
+        } else {
+            asm_ss << "movl $0x55555555, " << reg << "\n";
+            asm_ss << "popcnt " << reg << ", " << reg << "\n";
+            asm_ss << "cmpl $16, " << reg << "\n";
+            asm_ss << "jz " << Lexit << "\n";
+        }
+        asm_ss << ".byte 0xEB, 0xFE\n";
+        asm_ss << Lexit << ":\n";
+        break;
+    }
+    case 64: {
+        // BTC (bit test and complement) + BTC = identity on the tested bit
+        // BTC flips a bit, second BTC flips it back. CF from second = original bit.
+        std::string Lexit = ".Ls" + std::to_string(labelCounter++) + "x";
+        if (intel) {
+            asm_ss << "mov " << reg << ", 1\n";   // bit 0 = 1
+            asm_ss << "btc " << reg << ", 0\n";   // flip bit 0 (now 0), CF=1
+            asm_ss << "btc " << reg << ", 0\n";   // flip back (now 1), CF=0
+            asm_ss << "jnc " << Lexit << "\n";    // CF=0, always taken
+        } else {
+            asm_ss << "movl $1, " << reg << "\n";
+            asm_ss << "btc $0, " << reg << "\n";
+            asm_ss << "btc $0, " << reg << "\n";
+            asm_ss << "jnc " << Lexit << "\n";
+        }
+        asm_ss << ".byte 0xF4\n";
+        asm_ss << Lexit << ":\n";
+        break;
+    }
+    case 65: {
+        // LZCNT/BSR combo: BSR of known value gives known result
+        // BSR(0x80000000) = 31 always
+        std::string Lexit = ".Ls" + std::to_string(labelCounter++) + "x";
+        if (intel) {
+            asm_ss << "mov " << reg << ", 0x80000000\n";
+            asm_ss << "bsr " << reg << ", " << reg << "\n"; // reg = 31
+            asm_ss << "cmp " << reg << ", 31\n";
+            asm_ss << "jz " << Lexit << "\n";
+        } else {
+            asm_ss << "movl $0x80000000, " << reg << "\n";
+            asm_ss << "bsr " << reg << ", " << reg << "\n";
+            asm_ss << "cmpl $31, " << reg << "\n";
+            asm_ss << "jz " << Lexit << "\n";
+        }
+        asm_ss << ".byte 0xCC\n";
         asm_ss << Lexit << ":\n";
         break;
     }
